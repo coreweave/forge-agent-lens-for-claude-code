@@ -115,8 +115,8 @@ export function deepEqual(a: unknown, b: unknown): boolean {
 export function appendToLog(logFile: string, level: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR', message: string): void {
   const line = `${new Date().toISOString()} | ${level} | ${message}\n`;
   try {
-    fs.mkdirSync(path.dirname(logFile), { recursive: true });
-    fs.appendFileSync(logFile, line);
+    fs.mkdirSync(path.dirname(logFile), { recursive: true, mode: 0o700 });
+    fs.appendFileSync(logFile, line, { mode: 0o600 });
   } catch {
     // If we can't write to the log we've already printed to console — swallow
   }

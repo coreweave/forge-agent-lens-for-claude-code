@@ -384,7 +384,7 @@ export class Daemon {
 export async function runDaemon(): Promise<void> {
   const settings = loadSettings();
   const { daemon_socket: socketPath, log_file: logFile } = settings;
-  fs.mkdirSync(path.dirname(logFile), { recursive: true });
+  fs.mkdirSync(path.dirname(logFile), { recursive: true, mode: 0o700 });
 
   const config = resolveDaemonConfig(settings, process.env);
   if (!config.project || !config.apiKey) {

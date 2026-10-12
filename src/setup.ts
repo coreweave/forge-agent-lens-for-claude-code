@@ -133,6 +133,12 @@ export const PLUGIN_NAME = 'forge';
 // Kept separate so renaming one does not silently break the other.
 export const NPM_PACKAGE_NAME = '@coreweave/forge-agent-lens-for-claude-code';
 
+// The chmod covers a dir that already existed, e.g. one the hook script created before install.
+function makePrivateDir(dir: string): void {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(dir, 0o700);
+}
+
 /**
  * Create (or recreate) the config directory, log directory, and settings.json.
  *
@@ -141,13 +147,13 @@ export const NPM_PACKAGE_NAME = '@coreweave/forge-agent-lens-for-claude-code';
  * plugin registration.
  */
 export function createConfig(configDir: string): ConfigResult {
-  fs.mkdirSync(configDir, { recursive: true });
+  makePrivateDir(configDir);
 
   const settingsFile = path.join(configDir, 'settings.json');
   const logDir = path.join(configDir, 'logs');
   const logFile = path.join(logDir, 'daemon.log');
 
-  fs.mkdirSync(logDir, { recursive: true });
+  makePrivateDir(logDir);
 
   const settings: Settings = {
     log_file: logFile,
@@ -465,7 +471,7 @@ export function loadSettings(): Settings {
 }
 
 export function saveSettings(settings: Settings): void {
-  fs.mkdirSync(CONFIG_DIR, { recursive: true });
+  makePrivateDir(CONFIG_DIR);
   fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
   fs.chmodSync(SETTINGS_FILE, 0o600);
 }
