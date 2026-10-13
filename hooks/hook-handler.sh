@@ -16,6 +16,9 @@
 
 set -uo pipefail
 
+# Logs hold prompt and tool data; the daemon started below inherits this umask.
+umask 077
+
 CONFIG_DIR="${HOME}/.forge-agent-lens-for-claude-code"
 SETTINGS_FILE="${CONFIG_DIR}/settings.json"
 ERROR_LOG="${CONFIG_DIR}/logs/hook-errors.log"
