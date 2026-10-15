@@ -181,6 +181,68 @@ test('the first chat span carries the prompt while Stop retains the root', async
   );
 });
 
+for (const { id, name, stopMessage, afterStop, outputs, responseIds } of [
+  {
+    id: 'never-written',
+    name: 'a final message the transcript never receives still ends the root output',
+    stopMessage: 'Done: 3x faster.',
+    afterStop: [],
+    outputs: ['Checking.', 'Done: 3x faster.'],
+    responseIds: ['response-a'],
+  },
+  {
+    id: 'late-written',
+    name: 'a final message written after Stop is recorded once',
+    stopMessage: 'Done: 3x faster.',
+    afterStop: [assistantEntry('response-b', 'Done: 3x faster.')],
+    outputs: ['Checking.', 'Done: 3x faster.'],
+    responseIds: ['response-a', 'response-b'],
+  },
+  {
+    id: 'superseded',
+    name: 'transcript output after a blocked Stop replaces its message',
+    stopMessage: 'Checking.',
+    afterStop: [assistantEntry('response-b', 'Continuing after the hook.')],
+    outputs: ['Checking.', 'Continuing after the hook.'],
+    responseIds: ['response-a', 'response-b'],
+  },
+]) {
+  test(name, async (t) => {
+    const exporter = await initForgeInMemory();
+    exporter.reset();
+    const sessionId = `root-stop-message-${id}`;
+    const transcript = makeTranscript(t, sessionId);
+    transcript.append(userEntry('benchmark it'), assistantEntry('response-a', 'Checking.'));
+    const daemon = makeGenaiDaemon();
+
+    await daemon.routeEvent({
+      hook_event_name: 'SessionStart', session_id: sessionId,
+      transcript_path: transcript.file, source: 'startup', cwd: '/x',
+    });
+    await daemon.routeEvent({
+      hook_event_name: 'UserPromptSubmit', session_id: sessionId,
+      prompt: 'benchmark it', prompt_id: 'p1',
+    });
+    await daemon.routeEvent({
+      hook_event_name: 'Stop', session_id: sessionId, prompt_id: 'p1',
+      last_assistant_message: stopMessage,
+    });
+    if (afterStop.length) transcript.append(...afterStop);
+    await daemon.routeEvent({
+      hook_event_name: 'SessionEnd', session_id: sessionId, reason: 'clear',
+    });
+    await flushForge();
+
+    const spans = exporter.getFinishedSpans();
+    const [turn] = turns(spans);
+    assert.equal(
+      turn.attributes[ATTR.OUTPUT_MESSAGES],
+      JSON.stringify(outputs.map(content => ({ role: 'assistant', content }))),
+    );
+    assert.deepEqual(chats(spans).map(span => span.attributes[ATTR.RESPONSE_ID]), responseIds);
+  });
+}
+
 test('a mid-turn transcript user line does not copy the prompt onto a replayed chat span', async (t) => {
   const exporter = await initForgeInMemory();
   exporter.reset();

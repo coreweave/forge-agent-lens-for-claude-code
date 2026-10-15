@@ -244,7 +244,12 @@ export function assistantResponses(session: ParsedSession): AssistantResponse[] 
 export function lastAssistantTextEndsWith(session: ParsedSession, suffix: string): boolean {
   const response = assistantResponses(session).at(-1);
   return response !== undefined
-    && extractAssistantTextBlocks(response.content).join('\n').trimEnd().endsWith(suffix);
+    && textsEndWith(extractAssistantTextBlocks(response.content), suffix);
+}
+
+/** Compare against Claude Code's `last_assistant_message`, ignoring trailing whitespace. */
+export function textsEndWith(texts: string[], suffix: string): boolean {
+  return texts.join('\n').trimEnd().endsWith(suffix.trimEnd());
 }
 
 type AnthropicContentBlock = AnthropicMessage['content'][number];

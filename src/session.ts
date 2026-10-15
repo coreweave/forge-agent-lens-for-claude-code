@@ -23,6 +23,7 @@ import {
   isToolUseBlock,
   lastAssistantTextEndsWith,
   parseSessionFd,
+  textsEndWith,
 } from './parser.js';
 import type { AssistantResponse, ParsedSession } from './parser.js';
 import { VERSION } from './setup.js';
@@ -54,6 +55,8 @@ export type TurnTrace = {
   seenResponses: Set<string>;
   /** Set by StopFailure so whichever path closes the turn marks it ERROR. */
   failure?: Error;
+  /** Latest Stop's `last_assistant_message` and the response count its parse saw. */
+  stopMessage?: { text: string; responseCount: number };
 };
 
 type NewSessionOptions = {
@@ -194,6 +197,9 @@ export class Session {
     const turn = this.turnForPrompt(promptId) ?? this.ensureTurn(promptId);
     const parsed = await this.parseTranscriptWithRetry(lastAssistantMessage);
     const responses = parsed ? this.responsesForTurn(parsed, turn) : [];
+    turn.stopMessage = lastAssistantMessage
+      ? { text: lastAssistantMessage, responseCount: responses.length }
+      : undefined;
     this.recordTurnOutput(turn, responses, { lastMessage: lastAssistantMessage });
     turn.phase = 'stopped';
     return {
@@ -462,7 +468,9 @@ export class Session {
     });
 
     const outputTexts = responses.flatMap(response => extractAssistantTextBlocks(response.content));
-    if (!outputTexts.length && options.lastMessage) outputTexts.push(options.lastMessage);
+    if (options.lastMessage && !textsEndWith(outputTexts, options.lastMessage)) {
+      outputTexts.push(options.lastMessage);
+    }
     if (outputTexts.length) {
       turn.span.record({ outputMessages: assistantOutputMessages(outputTexts) });
     }
@@ -484,7 +492,13 @@ export class Session {
     parsed: ParsedSession | null,
   ): void {
     const responses = parsed ? this.responsesForTurn(parsed, turn) : [];
+    // Once the transcript has moved past Stop's parse, it holds newer output than the hook text.
+    const stopMessage = turn.stopMessage
+      && responses.length <= turn.stopMessage.responseCount
+      ? turn.stopMessage.text
+      : undefined;
     this.recordTurnOutput(turn, responses, {
+      lastMessage: stopMessage,
       orphanReason: turn.phase === 'active' ? orphanReason : undefined,
     });
   }
@@ -575,6 +589,9 @@ export class Session {
         return result;
       }
       if (i < attempts - 1) await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+    if (expected) {
+      this.log('INFO', `Transcript did not reach last_assistant_message after ${attempts} reads`);
     }
     return result;
   }
