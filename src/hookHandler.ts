@@ -759,14 +759,25 @@ export class HookHandler {
     input: SubagentStopHookInput,
     sequence: number,
   ): Promise<void> {
-    const session = await this.getOrReconstructSession(sessionId, input);
+    const live = this.sessions.get(sessionId);
+    const transcriptPath = input.agent_transcript_path
+      ?? subagentTranscriptPath(live?.transcriptPath ?? input.transcript_path, input.agent_id);
+    const hasTranscript = fs.existsSync(transcriptPath);
+    // A stopped agent always has a transcript, so an untracked one without it was never dispatched.
+    if (!hasTranscript && !live?.calls.byAgentId.has(input.agent_id)) {
+      this.log(
+        'DEBUG',
+        `SubagentStop: skipped untracked agent without transcript agentId=${input.agent_id} type=${input.agent_type}`,
+      );
+      return;
+    }
+
+    const session = live ?? await this.getOrReconstructSession(sessionId, input);
     if (!session || session.calls.agentTombstones.has(input.agent_id)) return;
 
-    const transcriptPath = input.agent_transcript_path
-      ?? subagentTranscriptPath(session.transcriptPath, input.agent_id);
     const active = session.calls.byAgentId.get(input.agent_id);
     let prompt = active?.prompt;
-    if (!prompt) {
+    if (!prompt && hasTranscript) {
       prompt = await readSubagentPrompt(transcriptPath);
       if (active && prompt) backfillAgentPrompt(active, prompt);
     }

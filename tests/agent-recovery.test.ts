@@ -512,3 +512,78 @@ test('a Stop-first recovered Agent adopts a late Post whose dispatch is in an ea
   assert.equal(agents[0].attributes[ATTR.AGENT_ID], agentId);
   assert.equal(agents[0].attributes[ATTR.FORGE_SUBAGENT_SPAWNING_TOOL_CALL_ID], 'agent-call');
 });
+
+test('untracked SubagentStop without a transcript emits no span and binds no call', async (t) => {
+  const exporter = await initForgeInMemory();
+  exporter.reset();
+  const sid = 'sub-phantom-stop';
+  const transcript = makeTranscript(t, sid, sid);
+  transcript.append(userEntry('delegate it'));
+  // Array-content user records carry no bare-string dispatch prompt.
+  const arrayPath = transcript.subagent(
+    'array-agent',
+    { type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'array task' }] } },
+    assistantEntry('array-msg', { type: 'text', text: 'array done' }),
+  );
+  const daemon = makeGenaiDaemon();
+
+  await daemon.routeEvent({
+    hook_event_name: 'SessionStart', session_id: sid,
+    transcript_path: transcript.file, source: 'startup', cwd: '/x',
+  });
+  await daemon.routeEvent({ hook_event_name: 'UserPromptSubmit', session_id: sid, prompt: 'delegate it' });
+  // Tracked: dispatched and started, then stopped with no readable transcript.
+  await daemon.routeEvent({
+    hook_event_name: 'PreToolUse', session_id: sid, tool_use_id: 'tracked-call',
+    tool_name: 'Agent', tool_input: { subagent_type: 'Explore', prompt: 'tracked task' },
+  });
+  await daemon.routeEvent({
+    hook_event_name: 'SubagentStart', session_id: sid,
+    agent_id: 'tracked-agent', agent_type: 'Explore',
+  });
+  await daemon.routeEvent({
+    hook_event_name: 'SubagentStop', session_id: sid,
+    agent_id: 'tracked-agent', agent_type: 'Explore', last_assistant_message: 'tracked done',
+  });
+  // Untracked with a transcript but no readable prompt: still recovered.
+  await daemon.routeEvent({
+    hook_event_name: 'SubagentStop', session_id: sid, agent_id: 'array-agent',
+    agent_type: 'Explore', agent_transcript_path: arrayPath,
+  });
+  // A pending typeless dispatch must not be claimed by the transcript-less fork.
+  await daemon.routeEvent({
+    hook_event_name: 'PreToolUse', session_id: sid, tool_use_id: 'typeless-call',
+    tool_name: 'Agent', tool_input: { prompt: 'typeless task' },
+  });
+  await daemon.routeEvent({
+    hook_event_name: 'SubagentStop', session_id: sid, agent_id: 'phantom-agent',
+    agent_type: 'claude', last_assistant_message: 'push it',
+  });
+  const typelessPath = transcript.subagent('typeless-agent', userEntry('typeless task'));
+  await daemon.routeEvent({
+    hook_event_name: 'SubagentStart', session_id: sid,
+    agent_id: 'typeless-agent', agent_type: 'general-purpose',
+  });
+  await daemon.routeEvent({
+    hook_event_name: 'SubagentStop', session_id: sid, agent_id: 'typeless-agent',
+    agent_type: 'general-purpose', agent_transcript_path: typelessPath,
+  });
+  await finish(daemon, sid);
+
+  const spans = exporter.getFinishedSpans();
+  const agents = spans.filter(span => span.attributes[ATTR.OPERATION_NAME] === 'invoke_agent'
+    && span.attributes[ATTR.AGENT_NAME] !== 'claude-code');
+  const spawningCalls = Object.fromEntries(agents.map(span => [
+    span.attributes[ATTR.AGENT_ID],
+    span.attributes[ATTR.FORGE_SUBAGENT_SPAWNING_TOOL_CALL_ID],
+  ]));
+  assert.deepEqual(spawningCalls, {
+    'array-agent': undefined,
+    'tracked-agent': 'tracked-call',
+    'typeless-agent': 'typeless-call',
+  });
+  const arrayAgent = agents.find(span => span.attributes[ATTR.AGENT_ID] === 'array-agent');
+  const arrayChats = spans.filter(span => span.attributes[ATTR.OPERATION_NAME] === 'chat'
+    && spanParentId(span) === arrayAgent?.spanContext().spanId);
+  assert.equal(arrayChats.length, 1, 'recovered agent keeps its transcript chat span');
+});
