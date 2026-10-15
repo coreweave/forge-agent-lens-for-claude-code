@@ -865,10 +865,7 @@ export class HookHandler {
       if (transcript.model) {
         match.call.span.setAttributes({ [ATTR.RESPONSE_MODEL]: transcript.model });
       }
-      if (!match.call.toolUseId && outputText) {
-        match.call.span.record({ outputMessages: assistantOutputMessages([outputText]) });
-      }
-      recordAgentStop(session.calls, match);
+      recordAgentStop(session.calls, match, outputText);
     } else if (recovered) {
       if (transcript.model) {
         recovered.span.setAttributes({ [ATTR.RESPONSE_MODEL]: transcript.model });

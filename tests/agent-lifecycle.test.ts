@@ -167,6 +167,112 @@ test('Agent Post before SubagentStop does not create a recovered duplicate', asy
   );
 });
 
+test('a completed Agent result records the reply text, not its envelope', async (t) => {
+  const { exporter, daemon, sid, agentId, subPath } = await boundAgent(t, 'completed-envelope');
+  await daemon.routeEvent({
+    hook_event_name: 'SubagentStop', session_id: sid, agent_id: agentId,
+    agent_type: 'Explore', agent_transcript_path: subPath, last_assistant_message: 'done',
+  });
+  await daemon.routeEvent({
+    hook_event_name: 'PostToolUse', session_id: sid, tool_use_id: 'agent-call',
+    tool_name: 'Agent', tool_input: { subagent_type: 'Explore', prompt: 'do it' },
+    tool_response: {
+      status: 'completed', prompt: 'do it', agentId, agentType: 'Explore',
+      content: [{ type: 'text', text: 'first finding' }, { type: 'text', text: 'second finding' }],
+      totalDurationMs: 1200, totalTokens: 150, totalToolUseCount: 0,
+      usage: { input_tokens: 120, output_tokens: 30 },
+    },
+  });
+  await finish(daemon, sid);
+
+  const agent = exporter.getFinishedSpans().find(span => span.attributes[ATTR.AGENT_ID] === agentId);
+  assert.ok(agent);
+  assert.equal(
+    agent.attributes[ATTR.OUTPUT_MESSAGES],
+    JSON.stringify([{ role: 'assistant', content: 'first finding\nsecond finding' }]),
+  );
+});
+
+test('a background Agent records its SubagentStop reply, not the launch receipt', async (t) => {
+  const exporter = await initForgeInMemory();
+  exporter.reset();
+  const sid = 'sub-async-launch';
+  const agentId = 'async-launch-agent';
+  const input = { subagent_type: 'Explore', prompt: 'do it' };
+  const transcript = makeTranscript(t, sid, 'async-launch');
+  transcript.append(userEntry('delegate it'));
+  const subPath = transcript.subagent(
+    agentId,
+    userEntry('do it'),
+    assistantEntry('async-sub-msg', { type: 'text', text: 'done' }),
+  );
+  const daemon = makeGenaiDaemon();
+
+  // Claude Code 2.1.300 runs an Agent in the background unless run_in_background is false.
+  await daemon.routeEvent({ hook_event_name: 'SessionStart', session_id: sid, transcript_path: transcript.file, source: 'startup', cwd: '/x' });
+  await daemon.routeEvent({ hook_event_name: 'UserPromptSubmit', session_id: sid, prompt_id: 'p1', prompt: 'delegate it' });
+  transcript.append(assistantEntry('parent-call', { type: 'tool_use', id: 'agent-call', name: 'Agent', input }));
+  await daemon.routeEvent({
+    hook_event_name: 'PreToolUse', session_id: sid, prompt_id: 'p1',
+    tool_use_id: 'agent-call', tool_name: 'Agent', tool_input: input,
+  });
+  await daemon.routeEvent({
+    hook_event_name: 'PostToolUse', session_id: sid, prompt_id: 'p1',
+    tool_use_id: 'agent-call', tool_name: 'Agent', tool_input: input,
+    tool_response: {
+      isAsync: true, status: 'async_launched', agentId, description: 'do it',
+      prompt: 'do it', outputFile: '/tmp/tasks/async-launch.output', canReadOutputFile: true,
+    },
+  });
+  await daemon.routeEvent({
+    hook_event_name: 'SubagentStart', session_id: sid, prompt_id: 'p1',
+    agent_id: agentId, agent_type: 'Explore',
+  });
+  transcript.append(assistantEntry('parent-wait', { type: 'text', text: 'Waiting on the agent.' }));
+  await daemon.routeEvent({
+    hook_event_name: 'Stop', session_id: sid, prompt_id: 'p1',
+    last_assistant_message: 'Waiting on the agent.',
+  });
+  await daemon.routeEvent({
+    hook_event_name: 'SubagentStop', session_id: sid, prompt_id: 'p1', agent_id: agentId,
+    agent_type: 'Explore', agent_transcript_path: subPath, last_assistant_message: 'done',
+  });
+  const notification = '<task-notification>\n<task-id>async-launch-agent</task-id>\n<status>completed</status>\n</task-notification>';
+  transcript.append(userEntry(notification), assistantEntry('parent-relay', { type: 'text', text: 'done' }));
+  await daemon.routeEvent({ hook_event_name: 'UserPromptSubmit', session_id: sid, prompt_id: 'p2', prompt: notification });
+  await daemon.routeEvent({ hook_event_name: 'Stop', session_id: sid, prompt_id: 'p2', last_assistant_message: 'done' });
+  await finish(daemon, sid);
+
+  const spans = exporter.getFinishedSpans();
+  const agent = spans.find(span => span.attributes[ATTR.AGENT_ID] === agentId);
+  const launchingTurn = spans.find(span => span.attributes[ATTR.OPERATION_NAME] === 'invoke_agent'
+    && span.attributes[ATTR.AGENT_NAME] === 'claude-code'
+    && String(span.attributes[ATTR.INPUT_MESSAGES]).includes('delegate it'));
+  assert.ok(agent && launchingTurn);
+  assert.equal(spanParentId(agent), launchingTurn.spanContext().spanId);
+  assert.equal(
+    agent.attributes[ATTR.OUTPUT_MESSAGES],
+    JSON.stringify([{ role: 'assistant', content: 'done' }]),
+  );
+});
+
+test('a background Agent still running at SessionEnd records no launch receipt', async (t) => {
+  const { exporter, daemon, sid, agentId } = await boundAgent(t, 'async-unfinished');
+  await daemon.routeEvent({
+    hook_event_name: 'PostToolUse', session_id: sid, tool_use_id: 'agent-call',
+    tool_name: 'Agent', tool_input: { subagent_type: 'Explore', prompt: 'do it' },
+    tool_response: {
+      isAsync: true, status: 'async_launched', agentId, description: 'do it',
+      prompt: 'do it', outputFile: '/tmp/tasks/async-unfinished.output',
+    },
+  });
+  await finish(daemon, sid);
+
+  const agent = exporter.getFinishedSpans().find(span => span.attributes[ATTR.AGENT_ID] === agentId);
+  assert.ok(agent);
+  assert.equal(agent.attributes[ATTR.OUTPUT_MESSAGES], undefined);
+});
+
 test('terminal-first Agent without subtype learns its lifecycle type, not its name', async (t) => {
   const exporter = await initForgeInMemory();
   exporter.reset();

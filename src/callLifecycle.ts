@@ -11,6 +11,7 @@ import {
   jsonStr,
 } from './genaiSpans.js';
 import type { SpanParent } from './genaiSpans.js';
+import { extractAssistantTextBlocks } from './parser.js';
 import { VERSION } from './setup.js';
 import type { TurnTrace } from './session.js';
 import { deepEqual } from './utils.js';
@@ -66,6 +67,8 @@ export type TracedAgent = CallScope & PermissionContext & {
   agentId?: string;
   outcome?: ToolResult;
   stopSeen: boolean;
+  /** The SubagentStop reply, for results that carry none (background launches). */
+  stopOutput?: string;
   /** A protocol-specific terminal event can decide the result before nested
    * calls have drained. */
   completion?: AgentCompletion;
@@ -372,16 +375,28 @@ function finishToolCall(call: TracedTool, outcome: ToolResult): void {
   });
 }
 
+// Only a completed result carries `content`; a background launch's reply arrives with SubagentStop.
+function agentReplyText(output: JsonValue): string | undefined {
+  if (output === null || typeof output !== 'object' || Array.isArray(output)) {
+    return jsonStr(output) || undefined;
+  }
+  const content = output['content'];
+  return Array.isArray(content)
+    ? extractAssistantTextBlocks(content).join('\n') || undefined
+    : undefined;
+}
+
 function finishAgentSpan(
   call: TracedAgent,
   outcome: ToolResult,
   failureType?: string,
   endTime?: Date,
 ): void {
-  const output = outcome.ok ? outcome.output : outcome.error;
-  if (output !== undefined && output !== null && output !== '') {
-    const outputText = typeof output === 'string' ? output : jsonStr(output);
-    call.span.record({ outputMessages: assistantOutputMessages([outputText]) });
+  const output = outcome.ok
+    ? agentReplyText(outcome.output) ?? call.stopOutput
+    : outcome.error;
+  if (output) {
+    call.span.record({ outputMessages: assistantOutputMessages([output]) });
   }
   if (outcome.ok) {
     call.span.end(endTime ? { endTime } : undefined);
@@ -497,8 +512,10 @@ export function bindAgent(
 export function recordAgentStop(
   state: CallState,
   match: Extract<AgentMatch, { kind: 'found' }>,
+  output?: string,
 ): void {
   match.call.stopSeen = true;
+  if (output) match.call.stopOutput = output;
   finishAgentIfReady(state, match.call);
 }
 
