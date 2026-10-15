@@ -181,6 +181,37 @@ test('normalizes responses and splits turns only at typed prompts', () => {
   assert.equal(lastAssistantTextEndsWith(session, 'second answer'), true);
 });
 
+test('isMeta string injections stay in the current turn', () => {
+  const session = parseLines([
+    { type: 'user', message: { role: 'user', content: 'research it' } },
+    assistant('msg-a', '2026-01-01T00:00:01.000Z', [{ type: 'text', text: 'gathered' }]),
+    {
+      type: 'user',
+      isMeta: true,
+      origin: { kind: 'coordinator' },
+      message: {
+        role: 'user',
+        content: 'The coordinator sent a message while you were working:\nPlease write your final report now.',
+      },
+    },
+    assistant('msg-b', '2026-01-01T00:00:02.000Z', [{ type: 'text', text: 'report' }]),
+    {
+      type: 'user',
+      isMeta: true,
+      origin: { kind: 'task-notification' },
+      message: {
+        role: 'user',
+        content: '[SYSTEM NOTIFICATION - NOT USER INPUT]\nThis is an automated background-task event.',
+      },
+    },
+    assistant('msg-c', '2026-01-01T00:00:03.000Z', [{ type: 'text', text: 'noted' }]),
+  ]);
+
+  assert.equal(session.turns.length, 1);
+  assert.equal(session.turns[0].userText, 'research it');
+  assert.deepEqual(session.turns[0].text, ['gathered', 'report', 'noted']);
+});
+
 test('folds only consecutive assistant lines with the same response id', () => {
   const session = parseLines([
     { type: 'user', message: { role: 'user', content: 'go' } },
