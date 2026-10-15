@@ -286,3 +286,35 @@ test('repeated SubagentStop snapshots retain parenting and emit only new respons
     ['sub-msg-1', 'sub-msg-2'],
   );
 });
+
+test('a coordinator message mid-run keeps the earlier subagent chat spans', async (t) => {
+  const { exporter, daemon, sid, agentId, subPath } = await boundAgent(t, 'mid-run-message');
+  fs.appendFileSync(subPath, [
+    {
+      type: 'user',
+      isMeta: true,
+      origin: { kind: 'coordinator' },
+      message: {
+        role: 'user',
+        content: 'The coordinator sent a message while you were working:\nPlease write your final report now.',
+      },
+    },
+    assistantEntry('sub-msg-2', { type: 'text', text: 'final report' }, { finishReason: 'end_turn' }),
+  ].map(entry => JSON.stringify(entry)).join('\n') + '\n');
+  await daemon.routeEvent({
+    hook_event_name: 'SubagentStop', session_id: sid, agent_id: agentId,
+    agent_type: 'Explore', agent_transcript_path: subPath,
+  });
+  await daemon.routeEvent({ hook_event_name: 'PostToolUse', session_id: sid, tool_use_id: 'agent-call', tool_response: 'final report' });
+  await finish(daemon, sid);
+
+  const spans = exporter.getFinishedSpans();
+  const agent = spans.find(span => span.attributes[ATTR.AGENT_ID] === agentId);
+  assert.ok(agent);
+  assert.deepEqual(
+    spans.filter(span => spanParentId(span) === agent.spanContext().spanId
+      && span.attributes[ATTR.OPERATION_NAME] === 'chat')
+      .map(span => span.attributes[ATTR.RESPONSE_ID]).sort(),
+    ['sub-msg-1', 'sub-msg-2'],
+  );
+});

@@ -129,9 +129,8 @@ function buildSession(lines: TranscriptLine[]): ParsedSession {
       assistantLines.push(assistant);
     } else if (line.role === 'user') {
       const content = line.message?.['content'];
-      // Typed prompts are bare strings. Array-form user content is injected
-      // context (tool results, skills, reminders), so it stays in this turn.
-      if (typeof content === 'string' && content) {
+      // Typed prompts are bare strings; array content and isMeta strings are injected context.
+      if (typeof content === 'string' && content && line.raw['isMeta'] !== true) {
         if (turnStarted || assistantLines.length > 0) {
           turns.push(buildTurn(assistantLines, turnStartTime, turnUserText));
         }
