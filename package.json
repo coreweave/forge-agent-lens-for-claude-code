@@ -1,6 +1,6 @@
 {
   "name": "@coreweave/forge-agent-lens-for-claude-code",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Trace Claude Code sessions with CoreWeave Forge AgentLens for observability and debugging",
   "type": "module",
   "bin": {
