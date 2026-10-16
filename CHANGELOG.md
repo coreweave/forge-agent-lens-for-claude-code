@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/coreweave/forge-agent-lens-for-claude-code/compare/v0.4.0...v0.4.1) (2026-10-16)
+
+
+### Bug Fixes
+
+* **trace:** skip untracked SubagentStop without a transcript ([#188](https://github.com/coreweave/forge-agent-lens-for-claude-code/issues/188)) ([aca8ef0](https://github.com/coreweave/forge-agent-lens-for-claude-code/commit/aca8ef0ae4d74c7f56e25ab61fa3dd5721116707))
+
 ## [0.4.0](https://github.com/wandb/forge-agent-lens-for-claude-code/compare/v0.3.0...v0.4.0) (2026-10-13)
 
 
