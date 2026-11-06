@@ -14,6 +14,7 @@ import {
   flushForge,
   initForgeInMemory,
   makeGenaiDaemon,
+  makeTranscript as makeAgentTranscript,
   spanParentId,
 } from './helpers.ts';
 
@@ -77,7 +78,123 @@ function chats(spans: ReadableSpan[]): ReadableSpan[] {
   return spans.filter(span => span.attributes[ATTR.OPERATION_NAME] === 'chat');
 }
 
-test('Stop snapshots only new normalized responses and SessionEnd closes the root', async (t) => {
+for (const restart of [false, true]) {
+  test(`Stop exports the original root exactly once across ${restart ? 'lost daemon state' : 'later cleanup'}`, async (t) => {
+    const exporter = await initForgeInMemory();
+    exporter.reset();
+    const sessionId = `stop-export-${restart}`;
+    const transcript = makeTranscript(t, sessionId);
+    transcript.append(userEntry('first'));
+    const original = makeGenaiDaemon();
+    const base = { session_id: sessionId, transcript_path: transcript.file };
+    await original.routeEvent({ hook_event_name: 'UserPromptSubmit', ...base, prompt_id: 'p1', prompt: 'first' });
+    transcript.append(assistantEntry('first-chat', 'answer'));
+    await original.routeEvent({ hook_event_name: 'Stop', ...base, prompt_id: 'p1' });
+    await flushForge();
+    const [root] = turns(exporter.getFinishedSpans());
+    assert.ok(root, 'the root exports without SessionEnd or shutdown');
+    const chat = chats(exporter.getFinishedSpans())[0];
+    assert.equal(spanParentId(chat), root.spanContext().spanId);
+
+    const daemon = restart ? makeGenaiDaemon() : original;
+    transcript.append(userEntry('second'));
+    await daemon.routeEvent({ hook_event_name: 'UserPromptSubmit', ...base, prompt_id: 'p2', prompt: 'second' });
+    await daemon.routeEvent({ hook_event_name: 'Stop', ...base, prompt_id: 'p2' });
+    await daemon.routeEvent({ hook_event_name: 'SessionEnd', ...base, prompt_id: 'p2', reason: 'clear' });
+    await daemon.drain('inactivity');
+    await flushForge();
+    assert.equal(turns(exporter.getFinishedSpans()).filter(s => s.spanContext().spanId === root.spanContext().spanId).length, 1);
+    assert.equal(turns(exporter.getFinishedSpans()).length, 2);
+    if (restart) await original.drain('test cleanup');
+  });
+}
+
+for (const promptId of ['p1', undefined]) {
+  test(`blocked Stop continuation and late internal agent reuse the ended root (${promptId ?? 'legacy'})`, async (t) => {
+    const exporter = await initForgeInMemory();
+    exporter.reset();
+    const sessionId = `stop-continuation-${promptId}`;
+    const transcript = makeAgentTranscript(t, sessionId, 'stop-continuation');
+    transcript.append(userEntry('first'));
+    const daemon = makeGenaiDaemon();
+    const base = { session_id: sessionId, transcript_path: transcript.file, prompt_id: promptId };
+    await daemon.routeEvent({ hook_event_name: 'UserPromptSubmit', ...base, prompt: 'first' });
+    transcript.append(assistantEntry('before-stop', 'initial output'));
+    await daemon.routeEvent({ hook_event_name: 'Stop', ...base });
+    await flushForge();
+    const [root] = turns(exporter.getFinishedSpans());
+    assert.ok(root);
+    const output = root.attributes[ATTR.OUTPUT_MESSAGES];
+    await daemon.routeEvent({ hook_event_name: 'PreToolUse', ...base, tool_use_id: 'late-tool', tool_name: 'Bash', tool_input: { command: 'pwd' } });
+    await daemon.routeEvent({ hook_event_name: 'PostToolUse', ...base, tool_use_id: 'late-tool', tool_name: 'Bash', tool_response: '/x' });
+    const subPath = transcript.subagent('internal', userEntry('summarize'), assistantEntry('internal-chat', 'summary'));
+    await daemon.routeEvent({ hook_event_name: 'SubagentStop', ...base, agent_id: 'internal', agent_type: 'compact', agent_transcript_path: subPath });
+    transcript.append(assistantEntry('after-stop', 'continued output', { finishReason: 'end_turn' }));
+    await daemon.routeEvent({ hook_event_name: 'Stop', ...base });
+    await daemon.routeEvent({ hook_event_name: 'PostCompact', ...base, summary: 'late summary' });
+    await daemon.routeEvent({ hook_event_name: 'SessionEnd', ...base, reason: 'clear' });
+    await daemon.drain('test cleanup');
+    await flushForge();
+    const spans = exporter.getFinishedSpans();
+    const roots = turns(spans).filter(s => s.attributes[ATTR.AGENT_NAME] === 'claude-code');
+    assert.equal(roots.length, 1);
+    assert.equal(root.attributes[ATTR.OUTPUT_MESSAGES], output);
+    assert.equal(root.attributes[ATTR.RESPONSE_FINISH_REASONS], undefined);
+    for (const responseId of ['before-stop', 'after-stop']) {
+      const matches = chats(spans).filter(s => s.attributes[ATTR.RESPONSE_ID] === responseId);
+      assert.equal(matches.length, 1);
+      assert.equal(spanParentId(matches[0]), root.spanContext().spanId);
+    }
+    const tool = spans.find(s => s.attributes['gen_ai.tool.call.id'] === 'late-tool');
+    const agent = turns(spans).find(s => s.attributes[ATTR.AGENT_NAME] === 'compact');
+    assert.ok(tool && agent);
+    assert.equal(spanParentId(tool), root.spanContext().spanId);
+    assert.equal(spanParentId(agent), root.spanContext().spanId);
+    const internal = chats(spans).find(s => s.attributes[ATTR.RESPONSE_ID] === 'internal-chat');
+    assert.ok(internal);
+    assert.equal(spanParentId(internal), agent.spanContext().spanId);
+  });
+}
+
+for (const agent of [false, true]) {
+  test(`Stop waits for its last open ${agent ? 'agent' : 'tool'} then exports the root`, async (t) => {
+    const exporter = await initForgeInMemory();
+    exporter.reset();
+    const sessionId = `stop-open-child-${agent}`;
+    const transcript = makeAgentTranscript(t, sessionId, 'stop-child');
+    transcript.append(userEntry('work'));
+    const daemon = makeGenaiDaemon();
+    const base = { session_id: sessionId, transcript_path: transcript.file, prompt_id: 'p1' };
+    await daemon.routeEvent({ hook_event_name: 'UserPromptSubmit', ...base, prompt: 'work' });
+    await daemon.routeEvent({ hook_event_name: 'PreToolUse', ...base, tool_use_id: 'child', tool_name: agent ? 'Agent' : 'Bash', tool_input: agent ? { subagent_type: 'Explore', prompt: 'explore' } : { command: 'pwd' } });
+    if (agent) await daemon.routeEvent({ hook_event_name: 'SubagentStart', ...base, agent_id: 'explorer', agent_type: 'Explore' });
+    transcript.append(assistantEntry('open-chat', 'working'));
+    await daemon.routeEvent({ hook_event_name: 'Stop', ...base });
+    await flushForge();
+    const roots = () => turns(exporter.getFinishedSpans()).filter(s => s.attributes[ATTR.AGENT_NAME] === 'claude-code');
+    assert.equal(roots().length, 0, 'an open child holds the root');
+    if (agent) {
+      const subPath = transcript.subagent('explorer', userEntry('explore'), assistantEntry('explorer-chat', 'done'));
+      await daemon.routeEvent({ hook_event_name: 'SubagentStop', ...base, agent_id: 'explorer', agent_type: 'Explore', agent_transcript_path: subPath });
+      await flushForge();
+      assert.equal(roots().length, 0, 'a dispatched agent still awaits PostToolUse');
+    }
+    await daemon.routeEvent({ hook_event_name: 'PostToolUse', ...base, tool_use_id: 'child', tool_name: agent ? 'Agent' : 'Bash', tool_response: 'done' });
+    await flushForge();
+    assert.equal(roots().length, 1, 'last child completion exports the stopped root');
+    const child = exporter.getFinishedSpans().find(s => agent
+      ? s.attributes[ATTR.OPERATION_NAME] === 'invoke_agent' && s.attributes[ATTR.AGENT_NAME] === 'Explore'
+      : s.attributes['gen_ai.tool.call.id'] === 'child');
+    assert.ok(child);
+    assert.equal(spanParentId(child), roots()[0].spanContext().spanId);
+    await daemon.routeEvent({ hook_event_name: 'SessionEnd', ...base, reason: 'clear' });
+    await daemon.drain('test cleanup');
+    await flushForge();
+    assert.equal(roots().length, 1);
+  });
+}
+
+test('Stop exports the root and later snapshots emit only new normalized responses', async (t) => {
   const exporter = await initForgeInMemory();
   exporter.reset();
   const sessionId = 'root-stop-snapshots';
@@ -102,7 +219,7 @@ test('Stop snapshots only new normalized responses and SessionEnd closes the roo
   await daemon.routeEvent({ hook_event_name: 'Stop', session_id: sessionId });
   await flushForge();
 
-  assert.equal(turns(exporter.getFinishedSpans()).length, 0, 'blockable Stop retains the root');
+  assert.equal(turns(exporter.getFinishedSpans()).length, 1, 'Stop exports the root');
   assert.deepEqual(chats(exporter.getFinishedSpans()).map(span => span.attributes[ATTR.RESPONSE_ID]), [
     'response-a',
   ]);
@@ -125,6 +242,7 @@ test('Stop snapshots only new normalized responses and SessionEnd closes the roo
   const [turn] = turns(spans);
   const responseSpans = chats(spans);
   assert.ok(turn);
+  assert.equal(turns(spans).length, 1);
   assert.equal(responseSpans.length, 2, 'repeated Stop does not replay response-a');
   assert.deepEqual(responseSpans.map(span => span.attributes[ATTR.RESPONSE_ID]), [
     'response-a',
@@ -136,17 +254,16 @@ test('Stop snapshots only new normalized responses and SessionEnd closes the roo
     turn.attributes[ATTR.OUTPUT_MESSAGES],
     JSON.stringify([
       { role: 'assistant', content: 'working' },
-      { role: 'assistant', content: 'done' },
     ]),
   );
-  assert.deepEqual(turn.attributes[ATTR.RESPONSE_FINISH_REASONS], ['end_turn']);
+  assert.equal(turn.attributes[ATTR.RESPONSE_FINISH_REASONS], undefined);
   assert.equal(turn.attributes[ATTR.FORGE_INTEGRATION_NAME], 'forge-agent-lens-for-claude-code');
   assert.equal(turn.attributes[ATTR.FORGE_INTEGRATION_VERSION], VERSION);
   assert.equal(turn.attributes['forge.integration.meta.claude_code_app_version'], '1.2.3');
   assert.equal(responseSpans[0].attributes[ATTR.USAGE_INPUT_TOKENS], 30);
 });
 
-test('the first chat span carries the prompt while Stop retains the root', async (t) => {
+test('the first chat span carries the prompt when Stop exports the root', async (t) => {
   const exporter = await initForgeInMemory();
   exporter.reset();
   const sessionId = 'root-live-prompt';
@@ -169,7 +286,7 @@ test('the first chat span carries the prompt while Stop retains the root', async
   await flushForge();
 
   const spans = exporter.getFinishedSpans();
-  assert.equal(turns(spans).length, 0);
+  assert.equal(turns(spans).length, 1);
   assert.deepEqual(
     chats(spans).map(span => [span.attributes[ATTR.RESPONSE_ID], span.attributes[ATTR.INPUT_MESSAGES]]),
     [
@@ -388,7 +505,7 @@ test('an identical prompt submitted during transcript lag does not replay prior 
   await flushForge();
 
   const laggingSpans = exporter.getFinishedSpans();
-  assert.equal(turns(laggingSpans).length, 1, 'only the completed first root exports during lag');
+  assert.equal(turns(laggingSpans).length, 2, 'both stopped roots export during lag');
   assert.deepEqual(
     chats(laggingSpans).map(span => span.attributes[ATTR.RESPONSE_ID]),
     ['response-a'],
@@ -557,7 +674,7 @@ test('restart-first Stop does not claim another transcript prompt', async (t) =>
   assert.equal(chats(spans).length, 0);
 });
 
-test('SessionEnd binds a restart-first root with the same prompt_id', async (t) => {
+test('SessionEnd binds late chats to an ended restart-first root with the same prompt_id', async (t) => {
   const exporter = await initForgeInMemory();
   exporter.reset();
   const sessionId = 'root-stop-same-prompt-restart';
@@ -582,10 +699,7 @@ test('SessionEnd binds a restart-first root with the same prompt_id', async (t) 
   const [turn] = turns(spans);
   const chat = spans.find(span => span.attributes[ATTR.RESPONSE_ID] === 'final-response');
   assert.ok(turn && chat);
-  assert.equal(
-    turn.attributes[ATTR.INPUT_MESSAGES],
-    JSON.stringify([{ role: 'user', parts: [{ type: 'text', content: 'final prompt' }] }]),
-  );
+  assert.equal(turn.attributes[ATTR.INPUT_MESSAGES], undefined, 'an ended root cannot be amended');
   assert.equal(spanParentId(chat), turn.spanContext().spanId);
 });
 

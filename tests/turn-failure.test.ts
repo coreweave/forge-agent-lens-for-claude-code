@@ -39,7 +39,6 @@ test('StopFailure marks the turn as failed', async (t) => {
     error: 'rate_limit', error_details: '429 from the API after 3 retries',
     last_assistant_message: 'Let me check that file.',
   });
-  await daemon.routeEvent({ hook_event_name: 'SessionEnd', ...base, reason: 'clear' });
   await flushForge();
 
   const [turn] = exporter.getFinishedSpans()
@@ -47,6 +46,10 @@ test('StopFailure marks the turn as failed', async (t) => {
   assert.ok(turn, 'the turn exists');
   assert.equal(turn.status.code, 2, 'the span is marked ERROR');
   assert.equal(turn.status.message, '429 from the API after 3 retries');
+  await daemon.routeEvent({ hook_event_name: 'SessionEnd', ...base, reason: 'clear' });
+  await daemon.drain('test cleanup');
+  await flushForge();
+  assert.equal(exporter.getFinishedSpans().filter(s => s.attributes[ATTR.OPERATION_NAME] === 'invoke_agent').length, 1);
 });
 
 test('a successful Stop leaves the turn unerrored', async (t) => {
