@@ -3,6 +3,7 @@
 // SPDX-PackageName: forge-agent-lens-for-claude-code
 
 import type { AssistantResponse } from './parser.js';
+import type { Message } from '@coreweave/forge-sdk/agentlens/tracing';
 import {
   ATTR,
   buildUsage,
@@ -32,11 +33,24 @@ export function emitChatSpans(
   responses: AssistantResponse[],
   options: ChatOptions = {},
 ): void {
-  // A non-empty `seen` means an earlier span already carries the prompt.
-  let userMessage = options.seen?.size ? undefined : options.userMessage;
+  let userMessage = options.userMessage;
+  let toolResults: NonNullable<AssistantResponse['toolResults']> = [];
   for (const [index, response] of responses.entries()) {
+    toolResults.push(...response.toolResults ?? []);
     const key = responseKey(response, index);
-    if (!response.model || options.seen?.has(key)) continue;
+    if (!response.model) continue;
+    if (options.seen?.has(key)) {
+      userMessage = undefined;
+      toolResults = [];
+      continue;
+    }
+
+    const inputMessages: Message[] = [];
+    if (userMessage) inputMessages.push({ role: 'user', parts: [{ type: 'text', content: userMessage }] });
+    if (toolResults.length) inputMessages.push({
+      role: 'tool',
+      parts: toolResults.map(result => ({ type: 'tool_call_response', ...result })),
+    });
 
     const provider = providerFromModel(response.model);
     const llm = parent.startLLM({
@@ -46,9 +60,7 @@ export function emitChatSpans(
     });
     const parts = contentBlocksToParts(response.content);
     llm.record({
-      ...(userMessage
-        ? { inputMessages: [{ role: 'user', parts: [{ type: 'text', content: userMessage }] }] }
-        : {}),
+      ...(inputMessages.length ? { inputMessages } : {}),
       ...(parts.length ? { outputMessages: [{ role: 'assistant', parts }] } : {}),
       usage: buildUsage(response.usage, response.reasoningTokens),
       outputType: 'text',
@@ -59,5 +71,6 @@ export function emitChatSpans(
     llm.end({ endTime: parseTimestamp(response.endTime) ?? new Date() });
     options.seen?.add(key);
     userMessage = undefined;
+    toolResults = [];
   }
 }

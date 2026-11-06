@@ -46,6 +46,9 @@ test('subagent topology: marker owns its chat, tools, identity, and canonical re
   ]));
   assert.equal(tool.attributes[ATTR.AGENT_NAME], 'Explore');
   assert.equal(chat.attributes[ATTR.USAGE_INPUT_TOKENS], 120);
+  assert.equal(chat.attributes[ATTR.INPUT_MESSAGES], JSON.stringify([
+    { role: 'user', parts: [{ type: 'text', content: 'do it' }] },
+  ]));
   for (const span of [agent, chat, tool]) {
     assert.equal(span.attributes[ATTR.CONVERSATION_ID], sid);
     assert.equal(span.attributes[ATTR.FORGE_INTEGRATION_NAME], 'forge-agent-lens-for-claude-code');

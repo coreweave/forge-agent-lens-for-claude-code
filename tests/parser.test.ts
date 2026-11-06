@@ -29,6 +29,29 @@ function parseLines(lines: unknown[]): ParsedSession {
   }
 }
 
+test('tool results wait for the next new response across folded records and reset at prompts', () => {
+  const user = (content: unknown) => ({ type: 'user', message: { role: 'user', content } });
+  const result = (id: unknown, content?: unknown) => ({ type: 'tool_result', tool_use_id: id, content });
+  const session = parseLines([
+    user('prompt'),
+    assistant('a', '2026-01-01T00:00:01Z', []),
+    user([result('one', 'raw'), { type: 'text', text: 'ignore reminder' }, result(7, 'invalid')]),
+    assistant('a', '2026-01-01T00:00:02Z', []),
+    user([result('two', [{ type: 'text', text: 'first' }, { type: 'text', text: 'second' }]),
+      result('three', { error: 'failed' }), result('empty')]),
+    assistant('b', '2026-01-01T00:00:03Z', []),
+    user([result('discard', 'old')]),
+    user('new prompt'),
+    assistant('c', '2026-01-01T00:00:04Z', []),
+  ]);
+  assert.equal(session.turns[0].responses[0].toolResults, undefined);
+  assert.deepEqual(session.turns[0].responses[1].toolResults, [
+    { id: 'one', response: 'raw' }, { id: 'two', response: 'first\nsecond' },
+    { id: 'three', response: '{"error":"failed"}' }, { id: 'empty', response: '' },
+  ]);
+  assert.equal(session.turns[1].responses[0].toolResults, undefined);
+});
+
 test('rejects a transcript that shrinks below its captured boundary', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-parser-boundary-'));
   const file = path.join(dir, 'session.jsonl');

@@ -16,6 +16,42 @@ type StartedChat = {
   end?: unknown;
 };
 
+test('incremental chat inputs match Stop-only inputs with skipped models and no duplicates', () => {
+  const response = (id: string, model?: string, toolResults?: AssistantResponse['toolResults']): AssistantResponse => ({
+    id, model, toolResults, usage: { input_tokens: 1, output_tokens: 1 }, content: [],
+  });
+  const responses = [
+    response('skipped', undefined, [{ id: 'early', response: '' }]),
+    response('a', 'claude-opus-4-8'),
+    response('no-model', undefined, [{ id: 'tool-1', response: 'failed' }]),
+    response('b', 'claude-opus-4-8', [{ id: 'tool-2', response: 'ok' }]),
+    response('c', 'claude-opus-4-8'),
+  ];
+  const run = (split: boolean) => {
+    const records: { inputMessages?: unknown }[] = [];
+    const parent = { startLLM() { return {
+      record(value: { inputMessages?: unknown }) { records.push(value); },
+      setAttributes() {}, end() {},
+    }; } } as unknown as SpanParent;
+    const options = { userMessage: 'prompt', seen: new Set<string>(['unrelated']) };
+    if (split) emitChatSpans(parent, responses.slice(0, -1), options);
+    emitChatSpans(parent, responses, options);
+    emitChatSpans(parent, responses, options);
+    return records.map(record => record.inputMessages);
+  };
+  const expected = [
+    [{ role: 'user', parts: [{ type: 'text', content: 'prompt' }] },
+      { role: 'tool', parts: [{ type: 'tool_call_response', id: 'early', response: '' }] }],
+    [{ role: 'tool', parts: [
+      { type: 'tool_call_response', id: 'tool-1', response: 'failed' },
+      { type: 'tool_call_response', id: 'tool-2', response: 'ok' },
+    ] }],
+    undefined,
+  ];
+  assert.deepEqual(run(false), expected);
+  assert.deepEqual(run(true), expected);
+});
+
 test('emits each normalized response once without regrouping its content', () => {
   const started: StartedChat[] = [];
   const parent = {

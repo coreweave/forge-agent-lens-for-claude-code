@@ -16,8 +16,10 @@ Each of these looks like a bug and is not. Check here before filing one.
 - **A turn's last `chat` span appears only at Stop.** Earlier ones are sent at
   root `PreToolUse` (`Session.emitCompletedResponses`). Claude Code writes the
   rest of a response after running its tool, and a sent span cannot be amended.
-- **The first `chat` span carries the user prompt** as `gen_ai.input.messages`,
-  not the full model input, because the root span exports only at turn close.
+- **The first `chat` span carries the user (or subagent/teammate) prompt** as
+  `gen_ai.input.messages`. Each later chat span carries only input new since the
+  previous model call: tool results as `tool` role `tool_call_response` parts,
+  not the full history.
 - **`status_code: UNSET` on a successful span is correct.** OTel reserves `Ok`
   for explicit developer intent; UNSET is the success default. Failures already
   route through `span.end({ error })`, which sets ERROR plus `error.type`.

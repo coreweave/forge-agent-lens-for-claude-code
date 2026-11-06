@@ -48,6 +48,7 @@ export type TurnTrace = {
   children: Set<TracedCall>;
   /** Number of provider responses already present when this prompt began. */
   responseOffset: number;
+  chatResponseOffset: number;
   /** Upper transcript boundary once this turn is known to be complete. */
   responseLimit?: number;
   /** Supports repeated/blockable Stop hooks without duplicate chat spans. */
@@ -194,7 +195,7 @@ export class Session {
     const turn = this.turnForPrompt(promptId) ?? this.ensureTurn(promptId);
     const parsed = await this.parseTranscriptWithRetry(lastAssistantMessage);
     const responses = parsed ? this.responsesForTurn(parsed, turn) : [];
-    this.recordTurnOutput(turn, responses, { lastMessage: lastAssistantMessage });
+    this.recordTurnOutput(turn, responses, parsed, { lastMessage: lastAssistantMessage });
     turn.phase = 'stopped';
     return {
       responseCount: responses.length,
@@ -345,6 +346,7 @@ export class Session {
       phase: 'active',
       children: new Set(),
       responseOffset: cursor.responseOffset,
+      chatResponseOffset: cursor.responseOffset,
       seenResponses: new Set(),
     };
     if (cursor.responseLimit !== undefined) turn.responseLimit = cursor.responseLimit;
@@ -421,6 +423,7 @@ export class Session {
       // An exact prompt_id binds a root reconstructed from an earlier terminal
       // hook to the matching final transcript turn.
       turn.responseOffset = finalResponseOffset;
+      if (!turn.seenResponses.size) turn.chatResponseOffset = finalResponseOffset;
       turn.userText = finalTranscriptTurn.userText;
       if (turn.userText !== undefined) {
         turn.span.record({
@@ -443,7 +446,7 @@ export class Session {
   emitCompletedResponses(turn: TurnTrace): void {
     const parsed = this.parseTranscript();
     if (!parsed) return;
-    emitChatSpans(turn.span, this.responsesForTurn(parsed, turn).slice(0, -1), {
+    emitChatSpans(turn.span, assistantResponses(parsed).slice(turn.chatResponseOffset, turn.responseLimit).slice(0, -1), {
       agentName: this.agentName,
       seen: turn.seenResponses,
       userMessage: turn.userText,
@@ -453,9 +456,13 @@ export class Session {
   private recordTurnOutput(
     turn: TurnTrace,
     responses: AssistantResponse[],
+    parsed: ParsedSession | null,
     options: { lastMessage?: string; orphanReason?: string } = {},
   ): void {
-    emitChatSpans(turn.span, responses, {
+    const chatResponses = parsed
+      ? assistantResponses(parsed).slice(turn.chatResponseOffset, turn.responseLimit)
+      : responses;
+    emitChatSpans(turn.span, chatResponses, {
       agentName: this.agentName,
       seen: turn.seenResponses,
       userMessage: turn.userText,
@@ -484,7 +491,7 @@ export class Session {
     parsed: ParsedSession | null,
   ): void {
     const responses = parsed ? this.responsesForTurn(parsed, turn) : [];
-    this.recordTurnOutput(turn, responses, {
+    this.recordTurnOutput(turn, responses, parsed, {
       orphanReason: turn.phase === 'active' ? orphanReason : undefined,
     });
   }

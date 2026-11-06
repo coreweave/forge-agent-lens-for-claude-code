@@ -258,6 +258,36 @@ function toolResultEntry(toolUseId: string): Record<string, unknown> {
   };
 }
 
+test('PreToolUse and Stop preserve the same chat inputs as Stop alone', async (t) => {
+  const run = async (split: boolean) => {
+    const sid = `input-split-${split}`;
+    const { exporter, transcript, daemon, preToolUse } = await startLiveSession(t, sid);
+    transcript.append(toolUseEntry('a', 'tool-1'));
+    if (split) await preToolUse('tool-1');
+    transcript.append(toolResultEntry('tool-1'), toolUseEntry('a', 'tool-2'));
+    if (split) await preToolUse('tool-2');
+    transcript.append(toolResultEntry('tool-2'), toolUseEntry('b', 'tool-3'));
+    if (split) await preToolUse('tool-3');
+    transcript.append(toolResultEntry('tool-3'), assistantEntry('c', 'done'));
+    await daemon.routeEvent({ hook_event_name: 'Stop', session_id: sid });
+    await daemon.routeEvent({ hook_event_name: 'Stop', session_id: sid });
+    await flushForge();
+    return chats(exporter.getFinishedSpans()).map(span => [
+      span.attributes[ATTR.RESPONSE_ID], span.attributes[ATTR.INPUT_MESSAGES],
+    ]);
+  };
+  const toolMessage = (...ids: string[]) => JSON.stringify([{
+    role: 'tool', parts: ids.map(id => ({ type: 'tool_call_response', id, response: 'ok' })),
+  }]);
+  const expected = [
+    ['a', JSON.stringify([{ role: 'user', parts: [{ type: 'text', content: 'list files' }] }])],
+    ['b', toolMessage('tool-1', 'tool-2')],
+    ['c', toolMessage('tool-3')],
+  ];
+  assert.deepEqual(await run(false), expected);
+  assert.deepEqual(await run(true), expected);
+});
+
 async function startLiveSession(t: TestContext, sessionId: string) {
   const exporter = await initForgeInMemory();
   exporter.reset();

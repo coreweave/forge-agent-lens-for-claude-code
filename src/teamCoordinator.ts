@@ -110,7 +110,9 @@ function emitTeammate(
     startTime: parseTimestamp(turns[0]?.startTime ?? responses[0]?.startTime),
   });
   try {
-    emitChatSpans(span, responses, { agentName: memberName });
+    for (const turn of turns) {
+      emitChatSpans(span, turn.responses, { agentName: memberName, userMessage: turn.userText });
+    }
     const outputTexts = turns.flatMap(turn => turn.text);
     if (outputTexts.length) {
       span.record({ outputMessages: assistantOutputMessages(outputTexts) });
