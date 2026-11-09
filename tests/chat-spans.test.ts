@@ -127,6 +127,29 @@ test('emits each normalized response once without regrouping its content', () =>
   assert.deepEqual([...seen], ['id:msg-a:0']);
 });
 
+test('a prompt bound after the first emission lands on the next new span', () => {
+  const records: { inputMessages?: unknown }[] = [];
+  const parent = {
+    startLLM() {
+      return {
+        record(value: { inputMessages?: unknown }) { records.push(value); },
+        setAttributes() {}, end() {},
+      };
+    },
+  } as unknown as SpanParent;
+  const response = (id: string): AssistantResponse => ({
+    id, model: 'claude-opus-4-8', usage: { input_tokens: 1, output_tokens: 1 }, content: [],
+  });
+  const seen = new Set<string>();
+  emitChatSpans(parent, [response('a')], { seen });
+  emitChatSpans(parent, [response('a'), response('b')], { seen, userMessage: 'late prompt' });
+  assert.deepEqual(records[1].inputMessages, [
+    { role: 'user', parts: [{ type: 'text', content: 'late prompt' }] },
+  ]);
+  emitChatSpans(parent, [response('a'), response('b'), response('c')], { seen, userMessage: 'late prompt' });
+  assert.equal(records[2].inputMessages, undefined, 'the prompt is not replayed');
+});
+
 test('does not confuse nonconsecutive responses that reuse an id', () => {
   const recordedIds: string[] = [];
   const parent = {

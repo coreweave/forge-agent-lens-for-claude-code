@@ -432,6 +432,7 @@ export class Session {
       }
     } else {
       turn.responseOffset = Math.max(turn.responseOffset, finalResponseOffset);
+      if (!turn.seenResponses.size) turn.chatResponseOffset = turn.responseOffset;
     }
   }
 

@@ -21,6 +21,8 @@ type ChatOptions = {
   userMessage?: string;
 };
 
+const PROMPT_EMITTED_KEY = 'emitted:user-message';
+
 function responseKey(response: AssistantResponse, index: number): string {
   return response.id
     ? `id:${response.id}:${index}`
@@ -33,20 +35,22 @@ export function emitChatSpans(
   responses: AssistantResponse[],
   options: ChatOptions = {},
 ): void {
-  let userMessage = options.userMessage;
+  let userMessage = options.seen?.has(PROMPT_EMITTED_KEY) ? undefined : options.userMessage;
   let toolResults: NonNullable<AssistantResponse['toolResults']> = [];
   for (const [index, response] of responses.entries()) {
     toolResults.push(...response.toolResults ?? []);
     const key = responseKey(response, index);
     if (!response.model) continue;
     if (options.seen?.has(key)) {
-      userMessage = undefined;
       toolResults = [];
       continue;
     }
 
     const inputMessages: Message[] = [];
-    if (userMessage) inputMessages.push({ role: 'user', parts: [{ type: 'text', content: userMessage }] });
+    if (userMessage) {
+      inputMessages.push({ role: 'user', parts: [{ type: 'text', content: userMessage }] });
+      options.seen?.add(PROMPT_EMITTED_KEY);
+    }
     if (toolResults.length) inputMessages.push({
       role: 'tool',
       parts: toolResults.map(result => ({ type: 'tool_call_response', ...result })),

@@ -288,6 +288,32 @@ test('PreToolUse and Stop preserve the same chat inputs as Stop alone', async (t
   assert.deepEqual(await run(true), expected);
 });
 
+test('a prompt submitted during transcript lag does not claim earlier responses as chat', async (t) => {
+  const { exporter, transcript, daemon, preToolUse } = await startLiveSession(t, 'lag-claim');
+  transcript.append(toolUseEntry('r1', 'tool-1'));
+  await preToolUse('tool-1');
+  await daemon.routeEvent({ hook_event_name: 'Stop', session_id: 'lag-claim' });
+  // The second prompt is parsed before the transcript catches up, so its turn
+  // starts at a stale response offset.
+  await daemon.routeEvent({ hook_event_name: 'UserPromptSubmit', session_id: 'lag-claim', prompt: 'p2' });
+  transcript.append(
+    toolResultEntry('tool-1'),
+    assistantEntry('r2', 'turn1 answer'),
+    userEntry('p2'),
+    assistantEntry('r3', 'turn2 answer'),
+  );
+  await daemon.routeEvent({ hook_event_name: 'SessionEnd', session_id: 'lag-claim', reason: 'clear' });
+  await daemon.drain('test cleanup');
+  await flushForge();
+
+  const parents = new Map(
+    chats(exporter.getFinishedSpans()).map(span => [span.attributes[ATTR.RESPONSE_ID], spanParentId(span)]),
+  );
+  assert.equal(parents.has('r2'), false, "turn 1's late response is not claimed by turn 2's root");
+  assert.ok(parents.has('r3'));
+  assert.notEqual(parents.get('r3'), parents.get('r1'));
+});
+
 async function startLiveSession(t: TestContext, sessionId: string) {
   const exporter = await initForgeInMemory();
   exporter.reset();
