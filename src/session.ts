@@ -39,10 +39,12 @@ function retainedTurnSpan(
   span: tracing.Turn,
   conversation: tracing.Conversation,
   isEnded: () => boolean,
-): tracing.Turn {
+): { span: tracing.Turn; supported: boolean } {
   // forge-sdk 0.1.0-beta.0 forbids children of ended Turns. Its TS-protected
   // span is a plain runtime field; retain its context for late child factories.
-  const parentContext = trace.setSpan(ROOT_CONTEXT, (span as unknown as { span: Span }).span);
+  const inner = (span as unknown as { span?: Span }).span;
+  if (typeof inner?.spanContext !== 'function') return { span, supported: false };
+  const parentContext = trace.setSpan(ROOT_CONTEXT, inner);
   const context = {
     parentContext,
     conversationId: conversation.conversationId,
@@ -56,15 +58,18 @@ function retainedTurnSpan(
     startSubagent: (opts: tracing.SubAgentInit) => isEnded()
       ? tracing.SubAgent.create({ ...opts, ...context }) : span.startSubagent(opts),
   };
-  return new Proxy(span, {
-    get(target, property) {
-      if (property === 'startLLM' || property === 'startTool' || property === 'startSubagent') {
-        return children[property];
-      }
-      const value = Reflect.get(target, property, target);
-      return typeof value === 'function' ? value.bind(target) : value;
-    },
-  });
+  return {
+    supported: true,
+    span: new Proxy(span, {
+      get(target, property) {
+        if (property === 'startLLM' || property === 'startTool' || property === 'startSubagent') {
+          return children[property];
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }),
+  };
 }
 
 export type TurnTrace = {
@@ -76,7 +81,10 @@ export type TurnTrace = {
   userText?: string;
   /** A Stop snapshot is quiescent but remains reopenable because hooks block. */
   phase: 'active' | 'stopped';
-  ended?: boolean;
+  /** Root span ended; the turn stays findable so late children can attach. */
+  spanEnded?: boolean;
+  /** False when the forge-sdk internals the proxy relies on are missing. */
+  retained?: boolean;
   /** Calls are owned by their parent span; hook ids are only lookup indexes. */
   children: Set<TracedCall>;
   /** Number of provider responses already present when this prompt began. */
@@ -216,7 +224,7 @@ export class Session {
       this.pendingCompaction = attrs;
       return false;
     }
-    if (!turn.ended) setCompactionAttrs(turn.span, attrs);
+    if (!turn.spanEnded) setCompactionAttrs(turn.span, attrs);
     return true;
   }
 
@@ -229,7 +237,8 @@ export class Session {
     const responses = parsed ? this.responsesForTurn(parsed, turn) : [];
     this.recordTurnOutput(turn, responses, { lastMessage: lastAssistantMessage });
     turn.phase = 'stopped';
-    if (turn.children.size === 0) this.endTurnSpan(turn);
+    // An unreadable transcript must not freeze an empty root; keep it open.
+    if (turn.children.size === 0 && parsed) this.endTurnSpan(turn);
     return {
       responseCount: responses.length,
       model: responses.filter(response => response.model).at(-1)?.model,
@@ -382,7 +391,12 @@ export class Session {
       responseOffset: cursor.responseOffset,
       seenResponses: new Set(),
     };
-    turn.span = retainedTurnSpan(span, this.conversation, () => Boolean(turn.ended));
+    const retained = retainedTurnSpan(span, this.conversation, () => Boolean(turn.spanEnded));
+    if (!retained.supported) {
+      this.log('ERROR', 'forge-sdk internals changed: turn roots will stay open past Stop');
+    }
+    turn.retained = retained.supported;
+    turn.span = retained.span;
     if (cursor.responseLimit !== undefined) turn.responseLimit = cursor.responseLimit;
     this.turns.add(turn);
     if (options.makeCurrent !== false) this.currentTurn = turn;
@@ -458,7 +472,7 @@ export class Session {
       // hook to the matching final transcript turn.
       turn.responseOffset = finalResponseOffset;
       turn.userText = finalTranscriptTurn.userText;
-      if (turn.userText !== undefined && !turn.ended) {
+      if (turn.userText !== undefined && !turn.spanEnded) {
         turn.span.record({
           messages: [{ role: 'user', parts: [{ type: 'text', content: turn.userText }] }],
         });
@@ -496,7 +510,7 @@ export class Session {
       seen: turn.seenResponses,
       userMessage: turn.userText,
     });
-    if (turn.ended) return;
+    if (turn.spanEnded) return;
 
     const outputTexts = responses.flatMap(response => extractAssistantTextBlocks(response.content));
     if (!outputTexts.length && options.lastMessage) outputTexts.push(options.lastMessage);
@@ -566,12 +580,13 @@ export class Session {
   }
 
   private endTurnSpan(turn: TurnTrace, endTime?: Date): void {
-    if (turn.ended) return;
+    // Without a retained context, late children would orphan on an ended root.
+    if (turn.spanEnded || turn.retained === false) return;
     turn.span.end({
       ...(endTime ? { endTime } : {}),
       ...(turn.failure ? { error: turn.failure } : {}),
     });
-    turn.ended = true;
+    turn.spanEnded = true;
   }
 
   finishSupersededTurns(): void {
