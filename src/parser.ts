@@ -4,6 +4,7 @@
 
 import * as fs from 'fs';
 import type { SDKAssistantMessage } from '@anthropic-ai/claude-agent-sdk';
+import { jsonStr } from './utils.js';
 
 type AnthropicMessage = SDKAssistantMessage['message'];
 type AnthropicUsage = AnthropicMessage['usage'];
@@ -152,9 +153,9 @@ function buildSession(lines: TranscriptLine[]): ParsedSession {
           const id = readString(block['tool_use_id']);
           if (!id) continue;
           const value = block['content'];
-          const response = typeof value === 'string' ? value
-            : Array.isArray(value) ? value.filter(isTextBlock).map(part => part.text).join('\n')
-              : value == null ? '' : JSON.stringify(value);
+          const response = Array.isArray(value) && value.every(isTextBlock)
+            ? value.map(part => part.text).join('\n')
+            : jsonStr(value);
           toolResults.push({ id, response });
         }
       }

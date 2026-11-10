@@ -75,6 +75,29 @@ test('tool results survive an injected string user record before the next respon
   ]);
 });
 
+test('image-only tool results retain their content in the next response', () => {
+  const content = [{
+    type: 'image',
+    source: { type: 'base64', media_type: 'image/png', data: 'aW1hZ2U=' },
+  }];
+  const session = parseLines([
+    assistant('a', '2026-01-01T00:00:01Z', [
+      { type: 'tool_use', id: 'image-call', name: 'Read', input: { file_path: '/image.png' } },
+    ]),
+    {
+      type: 'user',
+      message: { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'image-call', content },
+      ] },
+    },
+    assistant('b', '2026-01-01T00:00:02Z', [{ type: 'text', text: 'done' }]),
+  ]);
+
+  assert.deepEqual(session.turns[0].responses[1].toolResults, [
+    { id: 'image-call', response: JSON.stringify(content) },
+  ]);
+});
+
 test('rejects a transcript that shrinks below its captured boundary', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-parser-boundary-'));
   const file = path.join(dir, 'session.jsonl');
