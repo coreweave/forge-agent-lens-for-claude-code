@@ -49,7 +49,6 @@ export function emitChatSpans(
     const inputMessages: Message[] = [];
     if (userMessage) {
       inputMessages.push({ role: 'user', parts: [{ type: 'text', content: userMessage }] });
-      options.seen?.add(PROMPT_EMITTED_KEY);
     }
     if (toolResults.length) inputMessages.push({
       role: 'tool',
@@ -74,6 +73,7 @@ export function emitChatSpans(
     if (options.agentName) llm.setAttributes({ [ATTR.AGENT_NAME]: options.agentName });
     llm.end({ endTime: parseTimestamp(response.endTime) ?? new Date() });
     options.seen?.add(key);
+    if (userMessage) options.seen?.add(PROMPT_EMITTED_KEY);
     userMessage = undefined;
     toolResults = [];
   }
