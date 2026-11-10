@@ -81,6 +81,7 @@ export type TurnTrace = {
   userText?: string;
   /** A Stop snapshot is quiescent but remains reopenable because hooks block. */
   phase: 'active' | 'stopped';
+  snapshotReady: boolean;
   /** Root span ended; the turn stays findable so late children can attach. */
   spanEnded?: boolean;
   /** False when the forge-sdk internals the proxy relies on are missing. */
@@ -237,8 +238,13 @@ export class Session {
     const responses = parsed ? this.responsesForTurn(parsed, turn) : [];
     this.recordTurnOutput(turn, responses, { lastMessage: lastAssistantMessage });
     turn.phase = 'stopped';
-    // An unreadable transcript must not freeze an empty root; keep it open.
-    if (turn.children.size === 0 && parsed) this.endTurnSpan(turn);
+    turn.snapshotReady = parsed !== null && parsed.turns.length > 0
+      && turn.userText !== undefined
+      && (lastAssistantMessage === undefined
+        || lastAssistantTextEndsWith(parsed, lastAssistantMessage.trimEnd()));
+    if (turn.snapshotReady && turn.children.size === 0 && turn.retained !== false) {
+      this.endTurnSpan(turn);
+    }
     return {
       responseCount: responses.length,
       model: responses.filter(response => response.model).at(-1)?.model,
@@ -299,7 +305,10 @@ export class Session {
 
   completeDeferredEnd(): boolean {
     for (const turn of this.turns) {
-      if (turn.phase === 'stopped' && turn.children.size === 0) this.endTurnSpan(turn);
+      if (turn.phase === 'stopped' && turn.snapshotReady
+        && turn.children.size === 0 && turn.retained !== false) {
+        this.endTurnSpan(turn);
+      }
     }
     this.finishSupersededTurns();
     if (!this.endRequested || this.hasOpenCalls()) return false;
@@ -387,6 +396,7 @@ export class Session {
       promptId: options.promptId,
       userText: cursor.userText,
       phase: 'active',
+      snapshotReady: false,
       children: new Set(),
       responseOffset: cursor.responseOffset,
       seenResponses: new Set(),
@@ -580,8 +590,7 @@ export class Session {
   }
 
   private endTurnSpan(turn: TurnTrace, endTime?: Date): void {
-    // Without a retained context, late children would orphan on an ended root.
-    if (turn.spanEnded || turn.retained === false) return;
+    if (turn.spanEnded) return;
     turn.span.end({
       ...(endTime ? { endTime } : {}),
       ...(turn.failure ? { error: turn.failure } : {}),

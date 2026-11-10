@@ -8,6 +8,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
+import * as tracing from '@coreweave/forge-sdk/agentlens/tracing';
 import { ATTR } from '../src/genaiSpans.ts';
 import { VERSION } from '../src/setup.ts';
 import {
@@ -77,6 +78,85 @@ function turns(spans: ReadableSpan[]): ReadableSpan[] {
 function chats(spans: ReadableSpan[]): ReadableSpan[] {
   return spans.filter(span => span.attributes[ATTR.OPERATION_NAME] === 'chat');
 }
+
+for (const scenario of [
+  { name: 'empty transcript', child: false, stale: false },
+  { name: 'empty transcript with a child', child: true, stale: false },
+  { name: 'stale transcript with a child', child: true, stale: true },
+]) {
+  test(`Stop keeps an unready root open until SessionEnd: ${scenario.name}`, async (t) => {
+    const exporter = await initForgeInMemory();
+    exporter.reset();
+    const sessionId = `unready-stop-${scenario.child}-${scenario.stale}`;
+    const transcript = makeTranscript(t, sessionId);
+    const daemon = makeGenaiDaemon();
+    const base = { session_id: sessionId, transcript_path: transcript.file, prompt_id: 'p1' };
+    await daemon.routeEvent({ hook_event_name: 'UserPromptSubmit', ...base, prompt: 'work' });
+    if (scenario.child) {
+      await daemon.routeEvent({ hook_event_name: 'PreToolUse', ...base, tool_use_id: 'child', tool_name: 'Bash', tool_input: { command: 'pwd' } });
+    }
+    if (scenario.stale) {
+      transcript.append(userEntry('work'), assistantEntry('working', 'working'));
+    }
+    await daemon.routeEvent({
+      hook_event_name: 'Stop', ...base,
+      ...(scenario.stale ? { last_assistant_message: 'finished' } : {}),
+    });
+    await flushForge();
+    assert.equal(turns(exporter.getFinishedSpans()).length, 0);
+
+    if (scenario.child) {
+      await daemon.routeEvent({ hook_event_name: 'PostToolUse', ...base, tool_use_id: 'child', tool_name: 'Bash', tool_response: 'done' });
+      await flushForge();
+      assert.equal(turns(exporter.getFinishedSpans()).length, 0, 'child completion preserves an unready root');
+    }
+    if (!scenario.stale) transcript.append(userEntry('work'));
+    transcript.append(assistantEntry('finished', 'finished', { finishReason: 'end_turn' }));
+    await daemon.routeEvent({ hook_event_name: 'SessionEnd', ...base, reason: 'clear' });
+    await flushForge();
+
+    const roots = turns(exporter.getFinishedSpans());
+    assert.equal(roots.length, 1);
+    assert.deepEqual(roots[0].attributes[ATTR.RESPONSE_FINISH_REASONS], ['end_turn']);
+    assert.ok(String(roots[0].attributes[ATTR.OUTPUT_MESSAGES]).includes('finished'));
+  });
+}
+
+test('unsupported context retention exports exactly one root at SessionEnd', async (t) => {
+  const exporter = await initForgeInMemory();
+  exporter.reset();
+  const startTurn = tracing.Conversation.prototype.startTurn;
+  t.mock.method(tracing.Conversation.prototype, 'startTurn', function (
+    this: tracing.Conversation,
+    options?: tracing.TurnInit,
+  ) {
+    const turn = startTurn.call(this, options);
+    return new Proxy(turn, {
+      get(target, property) {
+        if (property === 'span') return undefined;
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+  });
+  const sessionId = 'stop-unsupported-retention';
+  const transcript = makeTranscript(t, sessionId);
+  transcript.append(userEntry('work'));
+  const daemon = makeGenaiDaemon();
+  const base = { session_id: sessionId, transcript_path: transcript.file, prompt_id: 'p1' };
+  await daemon.routeEvent({ hook_event_name: 'UserPromptSubmit', ...base, prompt: 'work' });
+  transcript.append(assistantEntry('finished', 'finished', { finishReason: 'end_turn' }));
+  await daemon.routeEvent({ hook_event_name: 'Stop', ...base });
+  await flushForge();
+  assert.equal(turns(exporter.getFinishedSpans()).length, 0);
+
+  await daemon.routeEvent({ hook_event_name: 'SessionEnd', ...base, reason: 'clear' });
+  await daemon.drain('test cleanup');
+  await flushForge();
+  const roots = turns(exporter.getFinishedSpans());
+  assert.equal(roots.length, 1);
+  assert.deepEqual(roots[0].attributes[ATTR.RESPONSE_FINISH_REASONS], ['end_turn']);
+});
 
 for (const restart of [false, true]) {
   test(`Stop exports the original root exactly once across ${restart ? 'lost daemon state' : 'later cleanup'}`, async (t) => {
@@ -674,14 +754,14 @@ test('restart-first Stop does not claim another transcript prompt', async (t) =>
   assert.equal(chats(spans).length, 0);
 });
 
-test('SessionEnd binds late chats to an ended restart-first root with the same prompt_id', async (t) => {
+test('SessionEnd preserves input, output and finish reason after a restart-first Stop', async (t) => {
   const exporter = await initForgeInMemory();
   exporter.reset();
   const sessionId = 'root-stop-same-prompt-restart';
   const transcript = makeTranscript(t, sessionId);
   transcript.append(
     userEntry('final prompt'),
-    assistantEntry('final-response', 'finished'),
+    assistantEntry('final-response', 'finished', { finishReason: 'end_turn' }),
   );
   const daemon = makeGenaiDaemon();
 
@@ -689,6 +769,9 @@ test('SessionEnd binds late chats to an ended restart-first root with the same p
     hook_event_name: 'Stop', session_id: sessionId, prompt_id: 'prompt-a',
     transcript_path: transcript.file, cwd: '/x',
   });
+  await flushForge();
+  assert.equal(turns(exporter.getFinishedSpans()).length, 0);
+
   await daemon.routeEvent({
     hook_event_name: 'SessionEnd', session_id: sessionId, prompt_id: 'prompt-a',
     transcript_path: transcript.file, reason: 'clear',
@@ -699,7 +782,14 @@ test('SessionEnd binds late chats to an ended restart-first root with the same p
   const [turn] = turns(spans);
   const chat = spans.find(span => span.attributes[ATTR.RESPONSE_ID] === 'final-response');
   assert.ok(turn && chat);
-  assert.equal(turn.attributes[ATTR.INPUT_MESSAGES], undefined, 'an ended root cannot be amended');
+  assert.equal(turns(spans).length, 1);
+  assert.equal(turn.attributes[ATTR.INPUT_MESSAGES], JSON.stringify([
+    { role: 'user', parts: [{ type: 'text', content: 'final prompt' }] },
+  ]));
+  assert.equal(turn.attributes[ATTR.OUTPUT_MESSAGES], JSON.stringify([
+    { role: 'assistant', content: 'finished' },
+  ]));
+  assert.deepEqual(turn.attributes[ATTR.RESPONSE_FINISH_REASONS], ['end_turn']);
   assert.equal(spanParentId(chat), turn.spanContext().spanId);
 });
 
