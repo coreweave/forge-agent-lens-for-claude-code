@@ -52,7 +52,25 @@ async function idle(
 test('explicit team dispatch completes on TeammateIdle', async (t) => {
   const { exporter, daemon, sid } = await coordinator(t, 'direct-idle');
   await dispatch(daemon, sid, 'team-call', 'review');
-  await idle(t, daemon, 'direct-idle', 'review result', 'team-msg');
+  const teammate = makeTranscript(t, 'direct-idle-member', 'direct-idle-member');
+  teammate.append(
+    ...teammateEntries('direct-idle-member', 'review result', 'team-msg'),
+    {
+      type: 'user',
+      message: { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'team-read', content: 'contents' },
+      ] },
+    },
+    assistantEntry('team-msg-2', { type: 'text', text: 'review summary' }),
+  );
+  const teammateIdle = {
+    hook_event_name: 'TeammateIdle', session_id: 'direct-idle-member',
+    transcript_path: teammate.file, team_name: TEAM, teammate_name: MEMBER,
+  };
+  await daemon.routeEvent(teammateIdle);
+  await dispatch(daemon, sid, 'team-continuation-call', 'continue review');
+  teammate.append(assistantEntry('team-msg-2', { type: 'text', text: 'review continuation' }));
+  await daemon.routeEvent(teammateIdle);
   await daemon.routeEvent({
     hook_event_name: 'SessionEnd',
     session_id: sid,
@@ -65,12 +83,21 @@ test('explicit team dispatch completes on TeammateIdle', async (t) => {
     span.attributes[ATTR.FORGE_SUBAGENT_SPAWNING_TOOL_CALL_ID] === 'team-call');
   assert.ok(agent);
   assert.equal(agent.attributes[ATTR.OUTPUT_MESSAGES], JSON.stringify([
-    { role: 'assistant', content: 'review result' },
+    { role: 'assistant', content: 'review result\nreview summary' },
   ]));
   assert.ok(spans.some(span => span.attributes[ATTR.RESPONSE_ID] === 'team-msg'));
   assert.equal(spans.find(span => span.attributes[ATTR.RESPONSE_ID] === 'team-msg')
     ?.attributes[ATTR.INPUT_MESSAGES], JSON.stringify([
     { role: 'user', parts: [{ type: 'text', content: 'task: review result' }] },
+  ]));
+  const laterChats = spans.filter(span => span.attributes[ATTR.RESPONSE_ID] === 'team-msg-2');
+  assert.equal(laterChats.length, 2);
+  assert.equal(laterChats[0].attributes[ATTR.INPUT_MESSAGES], JSON.stringify([
+    { role: 'tool', parts: [{ type: 'tool_call_response', id: 'team-read', response: 'contents' }] },
+  ]));
+  assert.equal(laterChats[1].attributes[ATTR.INPUT_MESSAGES], undefined);
+  assert.equal(laterChats[1].attributes[ATTR.OUTPUT_MESSAGES], JSON.stringify([
+    { role: 'assistant', parts: [{ type: 'text', content: 'review continuation' }] },
   ]));
   assert.ok(spans.some(span =>
     span.attributes[ATTR.AGENT_NAME] === MEMBER
