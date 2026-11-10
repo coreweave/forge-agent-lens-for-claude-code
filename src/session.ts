@@ -30,6 +30,13 @@ import { TranscriptFile, readFirstTranscriptLine } from './transcriptFile.js';
 
 type TraceLog = (level: 'DEBUG' | 'INFO' | 'ERROR', message: string) => void;
 
+type StopSnapshot = {
+  responseCount: number;
+  model?: string;
+  rootEnded: boolean;
+  deferredReasons: ('open_children' | 'snapshot_not_ready' | 'retention_unsupported')[];
+};
+
 /** Keep forced parent closes after children opened during this clock tick. */
 function spanCloseTime(): Date {
   return new Date(Date.now() + 1);
@@ -232,7 +239,7 @@ export class Session {
   async snapshotStop(
     promptId: string | undefined,
     lastAssistantMessage?: string,
-  ): Promise<{ responseCount: number; model?: string }> {
+  ): Promise<StopSnapshot> {
     const turn = this.turnForPrompt(promptId) ?? this.ensureTurn(promptId);
     const parsed = await this.parseTranscriptWithRetry(lastAssistantMessage);
     const responses = parsed ? this.responsesForTurn(parsed, turn) : [];
@@ -245,9 +252,17 @@ export class Session {
     if (turn.snapshotReady && turn.children.size === 0 && turn.retained !== false) {
       this.endTurnSpan(turn);
     }
+    const deferredReasons: StopSnapshot['deferredReasons'] = [];
+    if (!turn.spanEnded) {
+      if (turn.children.size > 0) deferredReasons.push('open_children');
+      if (!turn.snapshotReady) deferredReasons.push('snapshot_not_ready');
+      if (turn.retained === false) deferredReasons.push('retention_unsupported');
+    }
     return {
       responseCount: responses.length,
       model: responses.filter(response => response.model).at(-1)?.model,
+      rootEnded: Boolean(turn.spanEnded),
+      deferredReasons,
     };
   }
 

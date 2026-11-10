@@ -242,6 +242,10 @@ corresponding tool or agent call span; context-window compaction is recorded as
 turn span open at compaction time (or the next turn if compaction fires
 between turns).
 
+Roots export at Stop once the snapshot is complete and all children have ended.
+Compaction after root export attaches to the next turn. Later output appears
+only as child spans; exported root attributes stay frozen.
+
 Each span includes per-call token usage (`gen_ai.usage.input_tokens`,
 `gen_ai.usage.output_tokens`, cache and reasoning token counts), model name
 (`gen_ai.request.model`), tool inputs and outputs
