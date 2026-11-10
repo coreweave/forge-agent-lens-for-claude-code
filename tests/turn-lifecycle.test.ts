@@ -385,6 +385,41 @@ test('Stop exports the root and later snapshots emit only new normalized respons
   assert.equal(responseSpans[0].attributes[ATTR.USAGE_INPUT_TOKENS], 30);
 });
 
+test('a second Stop records hook-only output beneath the ended root', async (t) => {
+  const exporter = await initForgeInMemory();
+  exporter.reset();
+  const sessionId = 'hook-only-stop-output';
+  const transcript = makeTranscript(t, sessionId);
+  transcript.append(userEntry('work'));
+  const daemon = makeGenaiDaemon();
+  const base = { session_id: sessionId, transcript_path: transcript.file, prompt_id: 'p1' };
+  await daemon.routeEvent({ hook_event_name: 'UserPromptSubmit', ...base, prompt: 'work' });
+  transcript.append(assistantEntry('initial-response', 'initial output'));
+  await daemon.routeEvent({ hook_event_name: 'Stop', ...base });
+  await flushForge();
+  const [root] = turns(exporter.getFinishedSpans());
+  assert.ok(root);
+  const output = root.attributes[ATTR.OUTPUT_MESSAGES];
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await daemon.routeEvent({ hook_event_name: 'Stop', ...base, last_assistant_message: 'continued answer' });
+  }
+  await daemon.routeEvent({ hook_event_name: 'SessionEnd', ...base, reason: 'clear' });
+  await daemon.drain('test cleanup');
+  await flushForge();
+  const spans = exporter.getFinishedSpans();
+  assert.equal(turns(spans).length, 1);
+  assert.equal(root.attributes[ATTR.OUTPUT_MESSAGES], output);
+  const responses = chats(spans);
+  assert.equal(responses.length, 2, 'a repeated hook-only answer exports once');
+  const continuation = responses.find(span => span.attributes[ATTR.RESPONSE_ID] === undefined);
+  assert.ok(continuation);
+  assert.equal(spanParentId(continuation), root.spanContext().spanId);
+  assert.equal(continuation.attributes[ATTR.OUTPUT_MESSAGES], JSON.stringify([
+    { role: 'assistant', content: 'continued answer' },
+  ]));
+});
+
 test('the first chat span carries the prompt when Stop exports the root', async (t) => {
   const exporter = await initForgeInMemory();
   exporter.reset();

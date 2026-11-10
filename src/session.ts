@@ -520,9 +520,20 @@ export class Session {
       seen: turn.seenResponses,
       userMessage: turn.userText,
     });
+    const outputTexts = responses.flatMap(response => extractAssistantTextBlocks(response.content));
+    if (turn.spanEnded && options.lastMessage && !outputTexts.includes(options.lastMessage)) {
+      const key = `stop:${options.lastMessage}`;
+      if (!turn.seenResponses.has(key)) {
+        const model = responses.filter(response => response.model).at(-1)?.model;
+        const chat = turn.span.startLLM({ model: model ?? this.initialRequestModel ?? 'unknown' });
+        chat.output(options.lastMessage);
+        chat.setAttributes({ [ATTR.AGENT_NAME]: this.agentName });
+        chat.end();
+        turn.seenResponses.add(key);
+      }
+    }
     if (turn.spanEnded) return;
 
-    const outputTexts = responses.flatMap(response => extractAssistantTextBlocks(response.content));
     if (!outputTexts.length && options.lastMessage) outputTexts.push(options.lastMessage);
     if (outputTexts.length) {
       turn.span.record({ outputMessages: assistantOutputMessages(outputTexts) });
