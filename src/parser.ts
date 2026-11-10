@@ -139,9 +139,10 @@ function buildSession(lines: TranscriptLine[]): ParsedSession {
       if (typeof content === 'string' && content) {
         if (turnStarted || assistantLines.length > 0) {
           turns.push(buildTurn(assistantLines, turnStartTime, turnUserText));
+        } else {
+          toolResults = [];
         }
         assistantLines = [];
-        toolResults = [];
         turnStarted = true;
         turnStartTime = line.timestamp;
         turnUserText = content;

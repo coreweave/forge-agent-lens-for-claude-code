@@ -29,10 +29,11 @@ function parseLines(lines: unknown[]): ParsedSession {
   }
 }
 
-test('tool results wait for the next new response across folded records and reset at prompts', () => {
+test('tool results wait for the next new response across folded records and reset at the first prompt', () => {
   const user = (content: unknown) => ({ type: 'user', message: { role: 'user', content } });
   const result = (id: unknown, content?: unknown) => ({ type: 'tool_result', tool_use_id: id, content });
   const session = parseLines([
+    user([result('discard', 'old')]),
     user('prompt'),
     assistant('a', '2026-01-01T00:00:01Z', []),
     user([result('one', 'raw'), { type: 'text', text: 'ignore reminder' }, result(7, 'invalid')]),
@@ -40,7 +41,6 @@ test('tool results wait for the next new response across folded records and rese
     user([result('two', [{ type: 'text', text: 'first' }, { type: 'text', text: 'second' }]),
       result('three', { error: 'failed' }), result('empty')]),
     assistant('b', '2026-01-01T00:00:03Z', []),
-    user([result('discard', 'old')]),
     user('new prompt'),
     assistant('c', '2026-01-01T00:00:04Z', []),
   ]);
@@ -50,6 +50,29 @@ test('tool results wait for the next new response across folded records and rese
     { id: 'three', response: '{"error":"failed"}' }, { id: 'empty', response: '' },
   ]);
   assert.equal(session.turns[1].responses[0].toolResults, undefined);
+});
+
+test('tool results survive an injected string user record before the next response', () => {
+  const session = parseLines([
+    assistant('a', '2026-01-01T00:00:01Z', [
+      { type: 'tool_use', id: 'read-call', name: 'Read', input: { file_path: '/file.ts' } },
+    ]),
+    {
+      type: 'user',
+      message: { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'read-call', content: 'contents' },
+      ] },
+    },
+    { type: 'user', message: { role: 'user', content: '<system-reminder>continue</system-reminder>' } },
+    assistant('b', '2026-01-01T00:00:02Z', [{ type: 'text', text: 'done' }]),
+  ]);
+
+  assert.equal(session.turns.length, 2);
+  assert.equal(session.turns[0].responses[0].toolResults, undefined);
+  assert.equal(session.turns[1].responses[0].id, 'b');
+  assert.deepEqual(session.turns[1].responses[0].toolResults, [
+    { id: 'read-call', response: 'contents' },
+  ]);
 });
 
 test('rejects a transcript that shrinks below its captured boundary', () => {
