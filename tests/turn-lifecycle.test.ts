@@ -271,6 +271,7 @@ test('PreToolUse and Stop preserve the same chat inputs as Stop alone', async (t
     transcript.append(toolResultEntry('tool-3'), assistantEntry('c', 'done'));
     await daemon.routeEvent({ hook_event_name: 'Stop', session_id: sid });
     await daemon.routeEvent({ hook_event_name: 'Stop', session_id: sid });
+    await daemon.drain('test cleanup');
     await flushForge();
     return chats(exporter.getFinishedSpans()).map(span => [
       span.attributes[ATTR.RESPONSE_ID], span.attributes[ATTR.INPUT_MESSAGES],
@@ -306,12 +307,20 @@ test('a prompt submitted during transcript lag does not claim earlier responses 
   await daemon.drain('test cleanup');
   await flushForge();
 
-  const parents = new Map(
-    chats(exporter.getFinishedSpans()).map(span => [span.attributes[ATTR.RESPONSE_ID], spanParentId(span)]),
+  const emittedChats = chats(exporter.getFinishedSpans());
+  assert.deepEqual(
+    emittedChats.map(span => [span.attributes[ATTR.RESPONSE_ID], span.attributes[ATTR.INPUT_MESSAGES]]),
+    [
+      ['r1', JSON.stringify([{ role: 'user', parts: [{ type: 'text', content: 'list files' }] }])],
+      ['r3', JSON.stringify([{ role: 'user', parts: [{ type: 'text', content: 'p2' }] }])],
+    ],
   );
-  assert.equal(parents.has('r2'), false, "turn 1's late response is not claimed by turn 2's root");
-  assert.ok(parents.has('r3'));
-  assert.notEqual(parents.get('r3'), parents.get('r1'));
+  const [r1, r3] = emittedChats;
+  assert.ok(r1 && r3);
+  const firstParent = spanParentId(r1);
+  const laterParent = spanParentId(r3);
+  assert.ok(firstParent && laterParent);
+  assert.notEqual(laterParent, firstParent);
 });
 
 async function startLiveSession(t: TestContext, sessionId: string) {
