@@ -3,6 +3,7 @@
 // SPDX-PackageName: forge-agent-lens-for-claude-code
 
 import type { AssistantResponse } from './parser.js';
+import type { Message } from '@coreweave/forge-sdk/agentlens/tracing';
 import {
   ATTR,
   buildUsage,
@@ -14,11 +15,14 @@ import type { SpanParent } from './genaiSpans.js';
 
 type ChatOptions = {
   agentName?: string;
+  offset?: number;
   /** Used by blockable/repeated stop hooks to emit each response once. */
   seen?: Set<string>;
   /** Recorded on the turn's first chat span; the root span exports only at turn close. */
   userMessage?: string;
 };
+
+const PROMPT_EMITTED_KEY = 'emitted:user-message';
 
 function responseKey(response: AssistantResponse, index: number): string {
   return response.id
@@ -32,11 +36,25 @@ export function emitChatSpans(
   responses: AssistantResponse[],
   options: ChatOptions = {},
 ): void {
-  // A non-empty `seen` means an earlier span already carries the prompt.
-  let userMessage = options.seen?.size ? undefined : options.userMessage;
+  let userMessage = options.seen?.has(PROMPT_EMITTED_KEY) ? undefined : options.userMessage;
+  let toolResults: NonNullable<AssistantResponse['toolResults']> = [];
   for (const [index, response] of responses.entries()) {
-    const key = responseKey(response, index);
-    if (!response.model || options.seen?.has(key)) continue;
+    toolResults.push(...response.toolResults ?? []);
+    const key = responseKey(response, (options.offset ?? 0) + index);
+    if (!response.model) continue;
+    if (options.seen?.has(key)) {
+      toolResults = [];
+      continue;
+    }
+
+    const inputMessages: Message[] = [];
+    if (userMessage) {
+      inputMessages.push({ role: 'user', parts: [{ type: 'text', content: userMessage }] });
+    }
+    if (toolResults.length) inputMessages.push({
+      role: 'tool',
+      parts: toolResults.map(result => ({ type: 'tool_call_response', ...result })),
+    });
 
     const provider = providerFromModel(response.model);
     const llm = parent.startLLM({
@@ -46,9 +64,7 @@ export function emitChatSpans(
     });
     const parts = contentBlocksToParts(response.content);
     llm.record({
-      ...(userMessage
-        ? { inputMessages: [{ role: 'user', parts: [{ type: 'text', content: userMessage }] }] }
-        : {}),
+      ...(inputMessages.length ? { inputMessages } : {}),
       ...(parts.length ? { outputMessages: [{ role: 'assistant', parts }] } : {}),
       usage: buildUsage(response.usage, response.reasoningTokens),
       outputType: 'text',
@@ -58,6 +74,8 @@ export function emitChatSpans(
     if (options.agentName) llm.setAttributes({ [ATTR.AGENT_NAME]: options.agentName });
     llm.end({ endTime: parseTimestamp(response.endTime) ?? new Date() });
     options.seen?.add(key);
+    if (userMessage) options.seen?.add(PROMPT_EMITTED_KEY);
     userMessage = undefined;
+    toolResults = [];
   }
 }

@@ -744,7 +744,7 @@ export class HookHandler {
       transcript = new TranscriptFile(transcriptPath);
       const turn = parseSessionFd(transcript.getFd())?.turns.at(-1);
       if (!turn) return {};
-      emitChatSpans(parent, turn.responses, { agentName: agentType, seen });
+      emitChatSpans(parent, turn.responses, { agentName: agentType, seen, userMessage: turn.userText });
       return { model: turn.model, text: turn.text.join('\n') || undefined };
     } catch (error) {
       this.log('DEBUG', `SubagentStop: could not parse transcript: ${error}`);

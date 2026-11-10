@@ -4,6 +4,7 @@
 
 import * as fs from 'fs';
 import type { SDKAssistantMessage } from '@anthropic-ai/claude-agent-sdk';
+import { jsonStr } from './utils.js';
 
 type AnthropicMessage = SDKAssistantMessage['message'];
 type AnthropicUsage = AnthropicMessage['usage'];
@@ -24,6 +25,7 @@ export interface AssistantResponse {
   content: unknown[];
   id?: string;
   finishReason?: string;
+  toolResults?: { id: string; response?: string }[];
 }
 
 export interface ParsedTurn {
@@ -86,6 +88,7 @@ type TranscriptLine = {
 };
 
 type AssistantLine = {
+  toolResults?: AssistantResponse['toolResults'];
   previousTimestamp?: string;
   timestamp?: string;
   id?: string;
@@ -122,10 +125,13 @@ function buildSession(lines: TranscriptLine[]): ParsedSession {
   let turnStartTime: string | undefined;
   let turnUserText: string | undefined;
   let previousTimestamp: string | undefined;
+  let toolResults: NonNullable<AssistantResponse['toolResults']> = [];
 
   for (const line of lines) {
     const assistant = decodeAssistantLine(line, previousTimestamp);
     if (assistant) {
+      if (toolResults.length) assistant.toolResults = toolResults;
+      toolResults = [];
       assistantLines.push(assistant);
     } else if (line.role === 'user') {
       const content = line.message?.['content'];
@@ -134,11 +140,24 @@ function buildSession(lines: TranscriptLine[]): ParsedSession {
       if (typeof content === 'string' && content) {
         if (turnStarted || assistantLines.length > 0) {
           turns.push(buildTurn(assistantLines, turnStartTime, turnUserText));
+        } else {
+          toolResults = [];
         }
         assistantLines = [];
         turnStarted = true;
         turnStartTime = line.timestamp;
         turnUserText = content;
+      } else if (Array.isArray(content)) {
+        for (const block of content) {
+          if (!isRecord(block) || block['type'] !== 'tool_result') continue;
+          const id = readString(block['tool_use_id']);
+          if (!id) continue;
+          const value = block['content'];
+          const response = Array.isArray(value) && value.every(isTextBlock)
+            ? value.map(part => part.text).join('\n')
+            : jsonStr(value);
+          toolResults.push({ id, response });
+        }
       }
     }
 
@@ -201,8 +220,10 @@ function buildTurn(
   userText?: string,
 ): ParsedTurn {
   const responses: AssistantResponse[] = [];
+  let pendingResults: NonNullable<AssistantResponse['toolResults']> = [];
 
   for (const line of lines) {
+    pendingResults.push(...line.toolResults ?? []);
     const previous = responses.at(-1);
     if (line.id && previous?.id === line.id) {
       previous.content.push(...line.content);
@@ -223,7 +244,9 @@ function buildTurn(
       content: line.content,
       id: line.id,
       finishReason: line.finishReason,
+      ...(pendingResults.length ? { toolResults: pendingResults } : {}),
     });
+    pendingResults = [];
   }
 
   return {

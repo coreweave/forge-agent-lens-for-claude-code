@@ -16,6 +16,42 @@ type StartedChat = {
   end?: unknown;
 };
 
+test('incremental chat inputs match Stop-only inputs with skipped models and no duplicates', () => {
+  const response = (id: string, model?: string, toolResults?: AssistantResponse['toolResults']): AssistantResponse => ({
+    id, model, toolResults, usage: { input_tokens: 1, output_tokens: 1 }, content: [],
+  });
+  const responses = [
+    response('skipped', undefined, [{ id: 'early', response: '' }]),
+    response('a', 'claude-opus-4-8'),
+    response('no-model', undefined, [{ id: 'tool-1', response: 'failed' }]),
+    response('b', 'claude-opus-4-8', [{ id: 'tool-2', response: 'ok' }]),
+    response('c', 'claude-opus-4-8'),
+  ];
+  const run = (split: boolean) => {
+    const records: { inputMessages?: unknown }[] = [];
+    const parent = { startLLM() { return {
+      record(value: { inputMessages?: unknown }) { records.push(value); },
+      setAttributes() {}, end() {},
+    }; } } as unknown as SpanParent;
+    const options = { userMessage: 'prompt', seen: new Set<string>(['unrelated']) };
+    if (split) emitChatSpans(parent, responses.slice(0, -1), options);
+    emitChatSpans(parent, responses, options);
+    emitChatSpans(parent, responses, options);
+    return records.map(record => record.inputMessages);
+  };
+  const expected = [
+    [{ role: 'user', parts: [{ type: 'text', content: 'prompt' }] },
+      { role: 'tool', parts: [{ type: 'tool_call_response', id: 'early', response: '' }] }],
+    [{ role: 'tool', parts: [
+      { type: 'tool_call_response', id: 'tool-1', response: 'failed' },
+      { type: 'tool_call_response', id: 'tool-2', response: 'ok' },
+    ] }],
+    undefined,
+  ];
+  assert.deepEqual(run(false), expected);
+  assert.deepEqual(run(true), expected);
+});
+
 test('emits each normalized response once without regrouping its content', () => {
   const started: StartedChat[] = [];
   const parent = {
@@ -89,6 +125,29 @@ test('emits each normalized response once without regrouping its content', () =>
     endTime: new Date('2026-01-01T00:00:02.000Z'),
   });
   assert.deepEqual([...seen], ['id:msg-a:0']);
+});
+
+test('a prompt bound after the first emission lands on the next new span', () => {
+  const records: { inputMessages?: unknown }[] = [];
+  const parent = {
+    startLLM() {
+      return {
+        record(value: { inputMessages?: unknown }) { records.push(value); },
+        setAttributes() {}, end() {},
+      };
+    },
+  } as unknown as SpanParent;
+  const response = (id: string): AssistantResponse => ({
+    id, model: 'claude-opus-4-8', usage: { input_tokens: 1, output_tokens: 1 }, content: [],
+  });
+  const seen = new Set<string>();
+  emitChatSpans(parent, [response('a')], { seen });
+  emitChatSpans(parent, [response('a'), response('b')], { seen, userMessage: 'late prompt' });
+  assert.deepEqual(records[1].inputMessages, [
+    { role: 'user', parts: [{ type: 'text', content: 'late prompt' }] },
+  ]);
+  emitChatSpans(parent, [response('a'), response('b'), response('c')], { seen, userMessage: 'late prompt' });
+  assert.equal(records[2].inputMessages, undefined, 'the prompt is not replayed');
 });
 
 test('does not confuse nonconsecutive responses that reuse an id', () => {

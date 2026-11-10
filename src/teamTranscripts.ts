@@ -355,7 +355,7 @@ export async function readNewTurns(
           if (cursor && index < cursor.responses - 1) return [];
           if (cursor && index === cursor.responses - 1) {
             const content = response.content.slice(cursor.content);
-            return content.length ? [{ ...response, content }] : [];
+            return content.length ? [{ ...response, content, toolResults: undefined }] : [];
           }
           return [response];
         });

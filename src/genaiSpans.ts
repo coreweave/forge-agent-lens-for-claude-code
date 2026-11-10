@@ -8,6 +8,7 @@ import type { Attributes } from '@opentelemetry/api';
 import type { Message, MessagePart, SubAgent, Tool, Turn, Usage } from '@coreweave/forge-sdk/agentlens/tracing';
 import { isTextBlock, isThinkingBlock, isRedactedThinkingBlock, isToolUseBlock } from './parser.js';
 import type { UsageSummary } from './parser.js';
+import { jsonStr } from './utils.js';
 
 /** Forge's two public invoke-agent handles that can own chat, tool, and
  * subagent spans. The SDK does not currently export a common parent type. */
@@ -96,17 +97,6 @@ export function providerFromModel(model: string | undefined): string | undefined
   if (/^(us\.)?anthropic\./i.test(model)) return 'aws.bedrock';
   if (/^claude-/i.test(model)) return 'anthropic';
   return undefined;
-}
-
-/** Stringify a value for an OTel attribute. Returns '' for null/undefined. */
-export function jsonStr(v: unknown): string {
-  if (v === undefined || v === null) return '';
-  if (typeof v === 'string') return v;
-  try {
-    return JSON.stringify(v);
-  } catch {
-    return String(v);
-  }
 }
 
 /** Plain assistant messages for turn and subagent `invoke_agent` spans;

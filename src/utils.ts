@@ -171,3 +171,14 @@ export function probeUnixSocket(
     client.once('error', () => settle(SocketState.Stale));
   });
 }
+
+/** Stringify a value for an OTel attribute. Returns '' for null/undefined. */
+export function jsonStr(v: unknown): string {
+  if (v === undefined || v === null) return '';
+  if (typeof v === 'string') return v;
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return String(v);
+  }
+}

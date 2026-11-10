@@ -8,12 +8,11 @@ import {
   addPermissionRequestEvent,
   addPermissionResolvedEvent,
   assistantOutputMessages,
-  jsonStr,
 } from './genaiSpans.js';
 import type { SpanParent } from './genaiSpans.js';
 import { VERSION } from './setup.js';
 import type { TurnTrace } from './session.js';
-import { deepEqual } from './utils.js';
+import { deepEqual, jsonStr } from './utils.js';
 
 export type JsonValue =
   | null

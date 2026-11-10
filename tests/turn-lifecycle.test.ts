@@ -258,6 +258,108 @@ function toolResultEntry(toolUseId: string): Record<string, unknown> {
   };
 }
 
+test('PreToolUse and Stop preserve the same chat inputs as Stop alone', async (t) => {
+  const run = async (split: boolean) => {
+    const sid = `input-split-${split}`;
+    const { exporter, transcript, daemon, preToolUse } = await startLiveSession(t, sid);
+    transcript.append(toolUseEntry('a', 'tool-1'));
+    if (split) await preToolUse('tool-1');
+    transcript.append(toolResultEntry('tool-1'), toolUseEntry('a', 'tool-2'));
+    if (split) await preToolUse('tool-2');
+    transcript.append(toolResultEntry('tool-2'), toolUseEntry('b', 'tool-3'));
+    if (split) await preToolUse('tool-3');
+    transcript.append(toolResultEntry('tool-3'), assistantEntry('c', 'done'));
+    await daemon.routeEvent({ hook_event_name: 'Stop', session_id: sid });
+    await daemon.routeEvent({ hook_event_name: 'Stop', session_id: sid });
+    await daemon.drain('test cleanup');
+    await flushForge();
+    return chats(exporter.getFinishedSpans()).map(span => [
+      span.attributes[ATTR.RESPONSE_ID], span.attributes[ATTR.INPUT_MESSAGES],
+    ]);
+  };
+  const toolMessage = (...ids: string[]) => JSON.stringify([{
+    role: 'tool', parts: ids.map(id => ({ type: 'tool_call_response', id, response: 'ok' })),
+  }]);
+  const expected = [
+    ['a', JSON.stringify([{ role: 'user', parts: [{ type: 'text', content: 'list files' }] }])],
+    ['b', toolMessage('tool-1', 'tool-2')],
+    ['c', toolMessage('tool-3')],
+  ];
+  assert.deepEqual(await run(false), expected);
+  assert.deepEqual(await run(true), expected);
+});
+
+test('a restart-first PreToolUse root emits each response of its turn once', async (t) => {
+  const exporter = await initForgeInMemory();
+  exporter.reset();
+  const sessionId = 'restart-first-pre-tool-use';
+  const transcript = makeTranscript(t, sessionId);
+  transcript.append(
+    userEntry('fix the build'),
+    toolUseEntry('r1', 'tool-1'),
+    toolResultEntry('tool-1'),
+    toolUseEntry('r2', 'tool-2'),
+  );
+  const daemon = makeGenaiDaemon();
+  const hook = { session_id: sessionId, prompt_id: 'prompt-a', transcript_path: transcript.file, cwd: '/x' };
+
+  await daemon.routeEvent({
+    hook_event_name: 'PreToolUse', ...hook,
+    tool_use_id: 'tool-2', tool_name: 'Bash', tool_input: { command: 'ls' },
+  });
+  transcript.append(toolResultEntry('tool-2'), assistantEntry('r3', 'done'));
+  await daemon.routeEvent({ hook_event_name: 'Stop', ...hook });
+  await daemon.routeEvent({ hook_event_name: 'SessionEnd', ...hook, reason: 'clear' });
+  await daemon.drain('test cleanup');
+  await flushForge();
+
+  const toolMessage = (id: string) => JSON.stringify([{
+    role: 'tool', parts: [{ type: 'tool_call_response', id, response: 'ok' }],
+  }]);
+  assert.deepEqual(
+    chats(exporter.getFinishedSpans()).map(span => [span.attributes[ATTR.RESPONSE_ID], span.attributes[ATTR.INPUT_MESSAGES]]),
+    [
+      ['r3', toolMessage('tool-2')],
+      ['r1', JSON.stringify([{ role: 'user', parts: [{ type: 'text', content: 'fix the build' }] }])],
+      ['r2', toolMessage('tool-1')],
+    ],
+  );
+});
+
+test('a prompt submitted during transcript lag does not claim earlier responses as chat', async (t) => {
+  const { exporter, transcript, daemon, preToolUse } = await startLiveSession(t, 'lag-claim');
+  transcript.append(toolUseEntry('r1', 'tool-1'));
+  await preToolUse('tool-1');
+  await daemon.routeEvent({ hook_event_name: 'Stop', session_id: 'lag-claim' });
+  // The second prompt is parsed before the transcript catches up, so its turn
+  // starts at a stale response offset.
+  await daemon.routeEvent({ hook_event_name: 'UserPromptSubmit', session_id: 'lag-claim', prompt: 'p2' });
+  transcript.append(
+    toolResultEntry('tool-1'),
+    assistantEntry('r2', 'turn1 answer'),
+    userEntry('p2'),
+    assistantEntry('r3', 'turn2 answer'),
+  );
+  await daemon.routeEvent({ hook_event_name: 'SessionEnd', session_id: 'lag-claim', reason: 'clear' });
+  await daemon.drain('test cleanup');
+  await flushForge();
+
+  const emittedChats = chats(exporter.getFinishedSpans());
+  assert.deepEqual(
+    emittedChats.map(span => [span.attributes[ATTR.RESPONSE_ID], span.attributes[ATTR.INPUT_MESSAGES]]),
+    [
+      ['r1', JSON.stringify([{ role: 'user', parts: [{ type: 'text', content: 'list files' }] }])],
+      ['r3', JSON.stringify([{ role: 'user', parts: [{ type: 'text', content: 'p2' }] }])],
+    ],
+  );
+  const [r1, r3] = emittedChats;
+  assert.ok(r1 && r3);
+  const firstParent = spanParentId(r1);
+  const laterParent = spanParentId(r3);
+  assert.ok(firstParent && laterParent);
+  assert.notEqual(laterParent, firstParent);
+});
+
 async function startLiveSession(t: TestContext, sessionId: string) {
   const exporter = await initForgeInMemory();
   exporter.reset();

@@ -24,6 +24,15 @@ test('subagent topology: marker owns its chat, tools, identity, and canonical re
     tool_use_id: 'read-call', tool_name: 'Read', tool_input: { file_path: '/flaky.test.ts' },
   });
   await daemon.routeEvent({ hook_event_name: 'PostToolUse', session_id: sid, tool_use_id: 'read-call', tool_response: 'contents' });
+  fs.appendFileSync(subPath, [
+    {
+      type: 'user',
+      message: { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'read-call', content: 'contents' },
+      ] },
+    },
+    assistantEntry('sub-msg-2', { type: 'text', text: 'read complete' }),
+  ].map(entry => JSON.stringify(entry)).join('\n') + '\n');
   await daemon.routeEvent({ hook_event_name: 'SubagentStop', session_id: sid, agent_id: agentId, agent_type: 'Explore', agent_transcript_path: subPath });
   await daemon.routeEvent({ hook_event_name: 'PostToolUse', session_id: sid, tool_use_id: 'agent-call', tool_response: 'canonical result' });
   await finish(daemon, sid);
@@ -46,6 +55,14 @@ test('subagent topology: marker owns its chat, tools, identity, and canonical re
   ]));
   assert.equal(tool.attributes[ATTR.AGENT_NAME], 'Explore');
   assert.equal(chat.attributes[ATTR.USAGE_INPUT_TOKENS], 120);
+  assert.equal(chat.attributes[ATTR.INPUT_MESSAGES], JSON.stringify([
+    { role: 'user', parts: [{ type: 'text', content: 'do it' }] },
+  ]));
+  const laterChat = spans.find(span => span.attributes[ATTR.RESPONSE_ID] === 'sub-msg-2');
+  assert.ok(laterChat);
+  assert.equal(laterChat.attributes[ATTR.INPUT_MESSAGES], JSON.stringify([
+    { role: 'tool', parts: [{ type: 'tool_call_response', id: 'read-call', response: 'contents' }] },
+  ]));
   for (const span of [agent, chat, tool]) {
     assert.equal(span.attributes[ATTR.CONVERSATION_ID], sid);
     assert.equal(span.attributes[ATTR.FORGE_INTEGRATION_NAME], 'forge-agent-lens-for-claude-code');

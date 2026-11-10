@@ -444,6 +444,7 @@ export class Session {
     const parsed = this.parseTranscript();
     if (!parsed) return;
     emitChatSpans(turn.span, this.responsesForTurn(parsed, turn).slice(0, -1), {
+      offset: turn.responseOffset,
       agentName: this.agentName,
       seen: turn.seenResponses,
       userMessage: turn.userText,
@@ -456,6 +457,7 @@ export class Session {
     options: { lastMessage?: string; orphanReason?: string } = {},
   ): void {
     emitChatSpans(turn.span, responses, {
+      offset: turn.responseOffset,
       agentName: this.agentName,
       seen: turn.seenResponses,
       userMessage: turn.userText,
