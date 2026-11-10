@@ -257,6 +257,12 @@ export class Session {
   ): Promise<{ responseCount: number }> {
     const turn = this.ensureTurn(promptId);
     turn.failure = new Error(failure.details ?? failure.reason);
+    if (turn.spanEnded) {
+      const child = turn.span.startTool({ name: 'turn.failure' });
+      const span = (child as unknown as { span: Span }).span;
+      span.updateName(child.name);
+      child.end({ error: turn.failure, errorType: failure.reason });
+    }
     const snapshot = await this.snapshotStop(promptId, failure.lastAssistantMessage);
     return { responseCount: snapshot.responseCount };
   }
