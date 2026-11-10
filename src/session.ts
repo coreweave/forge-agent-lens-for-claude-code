@@ -310,12 +310,6 @@ export class Session {
   }
 
   completeDeferredEnd(): boolean {
-    for (const turn of this.turns) {
-      if (turn.phase === 'stopped' && turn.snapshotReady
-        && turn.children.size === 0 && turn.retained !== false) {
-        this.endTurnSpan(turn);
-      }
-    }
     this.finishSupersededTurns();
     if (!this.endRequested || this.hasOpenCalls()) return false;
     const endTime = spanCloseTime();
@@ -606,8 +600,14 @@ export class Session {
 
   finishSupersededTurns(): void {
     for (const turn of [...this.turns]) {
-      if (turn.responseLimit !== undefined && turn.children.size === 0) {
+      if (turn.children.size !== 0) continue;
+
+      if (turn.responseLimit !== undefined) {
         this.finalizeTurn(turn, 'superseded_by_next_prompt');
+        continue;
+      }
+      if (turn.phase === 'stopped' && turn.snapshotReady && turn.retained !== false) {
+        this.endTurnSpan(turn);
       }
     }
   }

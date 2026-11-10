@@ -279,6 +279,43 @@ for (const agent of [false, true]) {
   });
 }
 
+test('a superseded stopped root records late output before its last child closes', async (t) => {
+  const exporter = await initForgeInMemory();
+  exporter.reset();
+  const sessionId = 'superseded-stop-late-output';
+  const transcript = makeTranscript(t, sessionId);
+  transcript.append(userEntry('first'));
+  const daemon = makeGenaiDaemon();
+  const base = { session_id: sessionId, transcript_path: transcript.file };
+  await daemon.routeEvent({ hook_event_name: 'UserPromptSubmit', ...base, prompt_id: 'p1', prompt: 'first' });
+  await daemon.routeEvent({ hook_event_name: 'PreToolUse', ...base, prompt_id: 'p1', tool_use_id: 'child', tool_name: 'Bash', tool_input: { command: 'pwd' } });
+  transcript.append(assistantEntry('initial-response', 'working'));
+  await daemon.routeEvent({ hook_event_name: 'Stop', ...base, prompt_id: 'p1' });
+  transcript.append(
+    assistantEntry('late-response', 'late first output', { finishReason: 'end_turn' }),
+    userEntry('second'),
+  );
+  await daemon.routeEvent({ hook_event_name: 'UserPromptSubmit', ...base, prompt_id: 'p2', prompt: 'second' });
+  await flushForge();
+  assert.equal(turns(exporter.getFinishedSpans()).length, 0);
+
+  await daemon.routeEvent({ hook_event_name: 'PostToolUse', ...base, prompt_id: 'p1', tool_use_id: 'child', tool_name: 'Bash', tool_response: '/x' });
+  await flushForge();
+  const spans = exporter.getFinishedSpans();
+  const roots = turns(spans);
+  assert.equal(roots.length, 1);
+  assert.equal(roots[0].attributes[ATTR.OUTPUT_MESSAGES], JSON.stringify([
+    { role: 'assistant', content: 'working' },
+    { role: 'assistant', content: 'late first output' },
+  ]));
+  assert.deepEqual(roots[0].attributes[ATTR.RESPONSE_FINISH_REASONS], ['end_turn']);
+  const lateChat = chats(spans).filter(span => span.attributes[ATTR.RESPONSE_ID] === 'late-response');
+  assert.equal(lateChat.length, 1);
+  assert.equal(spanParentId(lateChat[0]), roots[0].spanContext().spanId);
+  await daemon.routeEvent({ hook_event_name: 'SessionEnd', ...base, prompt_id: 'p2', reason: 'clear' });
+  await daemon.drain('test cleanup');
+});
+
 test('Stop exports the root and later snapshots emit only new normalized responses', async (t) => {
   const exporter = await initForgeInMemory();
   exporter.reset();
