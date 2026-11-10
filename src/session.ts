@@ -42,43 +42,6 @@ function spanCloseTime(): Date {
   return new Date(Date.now() + 1);
 }
 
-function retainedTurnSpan(
-  span: tracing.Turn,
-  conversation: tracing.Conversation,
-  isEnded: () => boolean,
-): { span: tracing.Turn; supported: boolean } {
-  // forge-sdk 0.1.0-beta.0 forbids children of ended Turns. Its TS-protected
-  // span is a plain runtime field; retain its context for late child factories.
-  const inner = (span as unknown as { span?: Span }).span;
-  if (typeof inner?.spanContext !== 'function') return { span, supported: false };
-  const parentContext = trace.setSpan(ROOT_CONTEXT, inner);
-  const context = {
-    parentContext,
-    conversationId: conversation.conversationId,
-    attributes: conversation.attributes,
-  };
-  const children = {
-    startLLM: (opts: tracing.LLMInit) => isEnded()
-      ? tracing.LLM.create({ ...opts, ...context }) : span.startLLM(opts),
-    startTool: (opts: tracing.ToolInit) => isEnded()
-      ? tracing.Tool.create({ ...opts, ...context }) : span.startTool(opts),
-    startSubagent: (opts: tracing.SubAgentInit) => isEnded()
-      ? tracing.SubAgent.create({ ...opts, ...context }) : span.startSubagent(opts),
-  };
-  return {
-    supported: true,
-    span: new Proxy(span, {
-      get(target, property) {
-        if (property === 'startLLM' || property === 'startTool' || property === 'startSubagent') {
-          return children[property];
-        }
-        const value = Reflect.get(target, property, target);
-        return typeof value === 'function' ? value.bind(target) : value;
-      },
-    }),
-  };
-}
-
 export type TurnTrace = {
   kind: 'turn';
   span: tracing.Turn;
@@ -90,9 +53,9 @@ export type TurnTrace = {
   phase: 'active' | 'stopped';
   snapshotReady: boolean;
   /** Root span ended; the turn stays findable so late children can attach. */
-  spanEnded?: boolean;
+  spanEnded: boolean;
   /** False when the forge-sdk internals the proxy relies on are missing. */
-  retained?: boolean;
+  retained: boolean;
   /** Calls are owned by their parent span; hook ids are only lookup indexes. */
   children: Set<TracedCall>;
   /** Number of provider responses already present when this prompt began. */
@@ -249,19 +212,19 @@ export class Session {
       && turn.userText !== undefined
       && (lastAssistantMessage === undefined
         || lastAssistantTextEndsWith(parsed, lastAssistantMessage.trimEnd()));
-    if (turn.snapshotReady && turn.children.size === 0 && turn.retained !== false) {
+    if (turn.snapshotReady && turn.children.size === 0 && turn.retained) {
       this.endTurnSpan(turn);
     }
     const deferredReasons: StopSnapshot['deferredReasons'] = [];
     if (!turn.spanEnded) {
       if (turn.children.size > 0) deferredReasons.push('open_children');
       if (!turn.snapshotReady) deferredReasons.push('snapshot_not_ready');
-      if (turn.retained === false) deferredReasons.push('retention_unsupported');
+      if (!turn.retained) deferredReasons.push('retention_unsupported');
     }
     return {
       responseCount: responses.length,
       model: responses.filter(response => response.model).at(-1)?.model,
-      rootEnded: Boolean(turn.spanEnded),
+      rootEnded: turn.spanEnded,
       deferredReasons,
     };
   }
@@ -274,8 +237,6 @@ export class Session {
     turn.failure = new Error(failure.details ?? failure.reason);
     if (turn.spanEnded) {
       const child = turn.span.startTool({ name: 'turn.failure' });
-      const span = (child as unknown as { span: Span }).span;
-      span.updateName(child.name);
       child.end({ error: turn.failure, errorType: failure.reason });
     }
     const snapshot = await this.snapshotStop(promptId, failure.lastAssistantMessage);
@@ -412,11 +373,13 @@ export class Session {
       userText: cursor.userText,
       phase: 'active',
       snapshotReady: false,
+      spanEnded: false,
+      retained: false,
       children: new Set(),
       responseOffset: cursor.responseOffset,
       seenResponses: new Set(),
     };
-    const retained = retainedTurnSpan(span, this.conversation, () => Boolean(turn.spanEnded));
+    const retained = retainedTurnSpan(span, this.conversation, () => turn.spanEnded);
     if (!retained.supported) {
       this.log('ERROR', 'forge-sdk internals changed: turn roots will stay open past Stop');
     }
@@ -632,7 +595,7 @@ export class Session {
         this.finalizeTurn(turn, 'superseded_by_next_prompt');
         continue;
       }
-      if (turn.phase === 'stopped' && turn.snapshotReady && turn.retained !== false) {
+      if (turn.phase === 'stopped' && turn.snapshotReady && turn.retained) {
         this.endTurnSpan(turn);
       }
     }
@@ -677,6 +640,43 @@ export class Session {
     }
     return result;
   }
+}
+
+function retainedTurnSpan(
+  span: tracing.Turn,
+  conversation: tracing.Conversation,
+  isEnded: () => boolean,
+): { span: tracing.Turn; supported: boolean } {
+  // forge-sdk 0.1.0-beta.0 forbids children of ended Turns. Its TS-protected
+  // span is a plain runtime field; retain its context for late child factories.
+  const inner = (span as unknown as { span?: Span }).span;
+  if (typeof inner?.spanContext !== 'function') return { span, supported: false };
+  const parentContext = trace.setSpan(ROOT_CONTEXT, inner);
+  const context = {
+    parentContext,
+    conversationId: conversation.conversationId,
+    attributes: conversation.attributes,
+  };
+  const children = {
+    startLLM: (opts: tracing.LLMInit) => isEnded()
+      ? tracing.LLM.create({ ...opts, ...context }) : span.startLLM(opts),
+    startTool: (opts: tracing.ToolInit) => isEnded()
+      ? tracing.Tool.create({ ...opts, ...context }) : span.startTool(opts),
+    startSubagent: (opts: tracing.SubAgentInit) => isEnded()
+      ? tracing.SubAgent.create({ ...opts, ...context }) : span.startSubagent(opts),
+  };
+  return {
+    supported: true,
+    span: new Proxy(span, {
+      get(target, property) {
+        if (property === 'startLLM' || property === 'startTool' || property === 'startSubagent') {
+          return children[property];
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }),
+  };
 }
 
 async function resolveConversationId(

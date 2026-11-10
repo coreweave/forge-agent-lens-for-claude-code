@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-PackageName: forge-agent-lens-for-claude-code
 
-import { test, type TestContext } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -15,27 +15,9 @@ import {
   flushForge,
   initForgeInMemory,
   makeGenaiDaemon,
-  makeTranscript as makeAgentTranscript,
+  makeTranscript,
   spanParentId,
 } from './helpers.ts';
-
-type Transcript = {
-  file: string;
-  append(...entries: Record<string, unknown>[]): void;
-};
-
-function makeTranscript(t: TestContext, sessionId: string): Transcript {
-  const dir = fs.mkdtempSync(path.join(os.homedir(), '.forge-turn-lifecycle-'));
-  const file = path.join(dir, `${sessionId}.jsonl`);
-  fs.writeFileSync(file, '');
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  return {
-    file,
-    append(...entries) {
-      fs.appendFileSync(file, entries.map(entry => JSON.stringify(entry)).join('\n') + '\n');
-    },
-  };
-}
 
 function userEntry(
   text: string,
@@ -194,7 +176,7 @@ for (const promptId of ['p1', undefined]) {
     const exporter = await initForgeInMemory();
     exporter.reset();
     const sessionId = `stop-continuation-${promptId}`;
-    const transcript = makeAgentTranscript(t, sessionId, 'stop-continuation');
+    const transcript = makeTranscript(t, sessionId, 'stop-continuation');
     transcript.append(userEntry('first'));
     const daemon = makeGenaiDaemon();
     const base = { session_id: sessionId, transcript_path: transcript.file, prompt_id: promptId };
@@ -246,7 +228,7 @@ for (const agent of [false, true]) {
     const exporter = await initForgeInMemory();
     exporter.reset();
     const sessionId = `stop-open-child-${agent}`;
-    const transcript = makeAgentTranscript(t, sessionId, 'stop-child');
+    const transcript = makeTranscript(t, sessionId, 'stop-child');
     transcript.append(userEntry('work'));
     const daemon = makeGenaiDaemon();
     const base = { session_id: sessionId, transcript_path: transcript.file, prompt_id: 'p1' };

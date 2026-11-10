@@ -79,7 +79,7 @@ test('StopFailure after Stop exports an ERROR child under the original root', as
 
   const spans = exporter.getFinishedSpans();
   assert.equal(spans.filter(span => span.attributes[ATTR.OPERATION_NAME] === 'invoke_agent').length, 1);
-  const failures = spans.filter(span => span.name === 'turn.failure');
+  const failures = spans.filter(span => span.attributes['gen_ai.tool.name'] === 'turn.failure');
   assert.equal(failures.length, 1);
   const [failure] = failures;
   assert.equal(spanParentId(failure), roots[0].spanContext().spanId);
