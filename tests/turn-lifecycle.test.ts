@@ -289,6 +289,43 @@ test('PreToolUse and Stop preserve the same chat inputs as Stop alone', async (t
   assert.deepEqual(await run(true), expected);
 });
 
+test('a restart-first PreToolUse root emits each response of its turn once', async (t) => {
+  const exporter = await initForgeInMemory();
+  exporter.reset();
+  const sessionId = 'restart-first-pre-tool-use';
+  const transcript = makeTranscript(t, sessionId);
+  transcript.append(
+    userEntry('fix the build'),
+    toolUseEntry('r1', 'tool-1'),
+    toolResultEntry('tool-1'),
+    toolUseEntry('r2', 'tool-2'),
+  );
+  const daemon = makeGenaiDaemon();
+  const hook = { session_id: sessionId, prompt_id: 'prompt-a', transcript_path: transcript.file, cwd: '/x' };
+
+  await daemon.routeEvent({
+    hook_event_name: 'PreToolUse', ...hook,
+    tool_use_id: 'tool-2', tool_name: 'Bash', tool_input: { command: 'ls' },
+  });
+  transcript.append(toolResultEntry('tool-2'), assistantEntry('r3', 'done'));
+  await daemon.routeEvent({ hook_event_name: 'Stop', ...hook });
+  await daemon.routeEvent({ hook_event_name: 'SessionEnd', ...hook, reason: 'clear' });
+  await daemon.drain('test cleanup');
+  await flushForge();
+
+  const toolMessage = (id: string) => JSON.stringify([{
+    role: 'tool', parts: [{ type: 'tool_call_response', id, response: 'ok' }],
+  }]);
+  assert.deepEqual(
+    chats(exporter.getFinishedSpans()).map(span => [span.attributes[ATTR.RESPONSE_ID], span.attributes[ATTR.INPUT_MESSAGES]]),
+    [
+      ['r3', toolMessage('tool-2')],
+      ['r1', JSON.stringify([{ role: 'user', parts: [{ type: 'text', content: 'fix the build' }] }])],
+      ['r2', toolMessage('tool-1')],
+    ],
+  );
+});
+
 test('a prompt submitted during transcript lag does not claim earlier responses as chat', async (t) => {
   const { exporter, transcript, daemon, preToolUse } = await startLiveSession(t, 'lag-claim');
   transcript.append(toolUseEntry('r1', 'tool-1'));

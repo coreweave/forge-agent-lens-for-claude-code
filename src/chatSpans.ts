@@ -15,6 +15,7 @@ import type { SpanParent } from './genaiSpans.js';
 
 type ChatOptions = {
   agentName?: string;
+  offset?: number;
   /** Used by blockable/repeated stop hooks to emit each response once. */
   seen?: Set<string>;
   /** Recorded on the turn's first chat span; the root span exports only at turn close. */
@@ -39,7 +40,7 @@ export function emitChatSpans(
   let toolResults: NonNullable<AssistantResponse['toolResults']> = [];
   for (const [index, response] of responses.entries()) {
     toolResults.push(...response.toolResults ?? []);
-    const key = responseKey(response, index);
+    const key = responseKey(response, (options.offset ?? 0) + index);
     if (!response.model) continue;
     if (options.seen?.has(key)) {
       toolResults = [];
