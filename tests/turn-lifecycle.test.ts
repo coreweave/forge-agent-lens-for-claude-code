@@ -211,13 +211,18 @@ for (const promptId of ['p1', undefined]) {
     await daemon.routeEvent({ hook_event_name: 'SubagentStop', ...base, agent_id: 'internal', agent_type: 'compact', agent_transcript_path: subPath });
     transcript.append(assistantEntry('after-stop', 'continued output', { finishReason: 'end_turn' }));
     await daemon.routeEvent({ hook_event_name: 'Stop', ...base });
-    await daemon.routeEvent({ hook_event_name: 'PostCompact', ...base, summary: 'late summary' });
-    await daemon.routeEvent({ hook_event_name: 'SessionEnd', ...base, reason: 'clear' });
+    await daemon.routeEvent({ hook_event_name: 'PostCompact', ...base, compact_summary: 'late summary' });
+    transcript.append(userEntry('next'));
+    const nextBase = { ...base, prompt_id: promptId === undefined ? undefined : 'p2' };
+    await daemon.routeEvent({ hook_event_name: 'UserPromptSubmit', ...nextBase, prompt: 'next' });
+    await daemon.routeEvent({ hook_event_name: 'SessionEnd', ...nextBase, reason: 'clear' });
     await daemon.drain('test cleanup');
     await flushForge();
     const spans = exporter.getFinishedSpans();
     const roots = turns(spans).filter(s => s.attributes[ATTR.AGENT_NAME] === 'claude-code');
-    assert.equal(roots.length, 1);
+    assert.equal(roots.length, 2);
+    assert.equal(root.attributes[ATTR.COMPACTION_SUMMARY], undefined);
+    assert.equal(roots[1].attributes[ATTR.COMPACTION_SUMMARY], 'late summary');
     assert.equal(root.attributes[ATTR.OUTPUT_MESSAGES], output);
     assert.equal(root.attributes[ATTR.RESPONSE_FINISH_REASONS], undefined);
     for (const responseId of ['before-stop', 'after-stop']) {

@@ -221,11 +221,11 @@ export class Session {
 
   setCompaction(promptId: string | undefined, attrs: CompactionAttrs): boolean {
     const turn = this.turnForPrompt(promptId);
-    if (!turn) {
+    if (!turn || turn.spanEnded) {
       this.pendingCompaction = attrs;
       return false;
     }
-    if (!turn.spanEnded) setCompactionAttrs(turn.span, attrs);
+    setCompactionAttrs(turn.span, attrs);
     return true;
   }
 
