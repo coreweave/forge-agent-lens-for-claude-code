@@ -922,10 +922,9 @@ export class HookHandler {
       input.last_assistant_message,
     );
     this.log(
-      'DEBUG',
-      `Stop: session=${sessionId} transcript_path=${session.transcriptPath} responses=${snapshot.responseCount} model=${snapshot.model ?? 'unknown'} last_assistant_message_present=${Boolean(input.last_assistant_message)}`,
+      'INFO',
+      `Recorded turn stop snapshot: session=${sessionId} transcript_path=${session.transcriptPath} root=${snapshot.rootEnded ? 'ended' : 'deferred'} deferred_reasons=${snapshot.deferredReasons.join(',')} responses=${snapshot.responseCount} model=${snapshot.model ?? 'unknown'} last_assistant_message_present=${Boolean(input.last_assistant_message)}`,
     );
-    this.log('INFO', 'Recorded turn stop snapshot');
   }
 
   private async handleStopFailure(

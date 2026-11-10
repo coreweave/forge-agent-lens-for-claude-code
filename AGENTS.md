@@ -17,7 +17,11 @@ Each of these looks like a bug and is not. Check here before filing one.
   root `PreToolUse` (`Session.emitCompletedResponses`). Claude Code writes the
   rest of a response after running its tool, and a sent span cannot be amended.
 - **The first `chat` span carries the user prompt** as `gen_ai.input.messages`,
-  not the full model input, because the root span exports only at turn close.
+  not the full model input, so the prompt is available before the root exports.
+- **The root ends at Stop once its children are done.** Blocked-Stop
+  continuations and late subagents parent to the ended root. Later responses
+  still appear as `chat` spans but cannot update the root's output messages or
+  finish reasons.
 - **`status_code: UNSET` on a successful span is correct.** OTel reserves `Ok`
   for explicit developer intent; UNSET is the success default. Failures already
   route through `span.end({ error })`, which sets ERROR plus `error.type`.

@@ -4,7 +4,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import type { Attributes } from '@opentelemetry/api';
+import { ROOT_CONTEXT, trace, type Attributes, type Span } from '@opentelemetry/api';
 import * as tracing from '@coreweave/forge-sdk/agentlens/tracing';
 import { emitChatSpans } from './chatSpans.js';
 import {
@@ -30,6 +30,13 @@ import { TranscriptFile, readFirstTranscriptLine } from './transcriptFile.js';
 
 type TraceLog = (level: 'DEBUG' | 'INFO' | 'ERROR', message: string) => void;
 
+type StopSnapshot = {
+  responseCount: number;
+  model?: string;
+  rootEnded: boolean;
+  deferredReasons: ('open_children' | 'snapshot_not_ready' | 'retention_unsupported')[];
+};
+
 /** Keep forced parent closes after children opened during this clock tick. */
 function spanCloseTime(): Date {
   return new Date(Date.now() + 1);
@@ -44,6 +51,11 @@ export type TurnTrace = {
   userText?: string;
   /** A Stop snapshot is quiescent but remains reopenable because hooks block. */
   phase: 'active' | 'stopped';
+  snapshotReady: boolean;
+  /** Root span ended; the turn stays findable so late children can attach. */
+  spanEnded: boolean;
+  /** False when the forge-sdk internals the proxy relies on are missing. */
+  retained: boolean;
   /** Calls are owned by their parent span; hook ids are only lookup indexes. */
   children: Set<TracedCall>;
   /** Number of provider responses already present when this prompt began. */
@@ -179,7 +191,7 @@ export class Session {
 
   setCompaction(promptId: string | undefined, attrs: CompactionAttrs): boolean {
     const turn = this.turnForPrompt(promptId);
-    if (!turn) {
+    if (!turn || turn.spanEnded) {
       this.pendingCompaction = attrs;
       return false;
     }
@@ -190,15 +202,30 @@ export class Session {
   async snapshotStop(
     promptId: string | undefined,
     lastAssistantMessage?: string,
-  ): Promise<{ responseCount: number; model?: string }> {
+  ): Promise<StopSnapshot> {
     const turn = this.turnForPrompt(promptId) ?? this.ensureTurn(promptId);
     const parsed = await this.parseTranscriptWithRetry(lastAssistantMessage);
     const responses = parsed ? this.responsesForTurn(parsed, turn) : [];
     this.recordTurnOutput(turn, responses, { lastMessage: lastAssistantMessage });
     turn.phase = 'stopped';
+    turn.snapshotReady = parsed !== null && parsed.turns.length > 0
+      && turn.userText !== undefined
+      && (lastAssistantMessage === undefined
+        || lastAssistantTextEndsWith(parsed, lastAssistantMessage.trimEnd()));
+    if (turn.snapshotReady && turn.children.size === 0 && turn.retained) {
+      this.endTurnSpan(turn);
+    }
+    const deferredReasons: StopSnapshot['deferredReasons'] = [];
+    if (!turn.spanEnded) {
+      if (turn.children.size > 0) deferredReasons.push('open_children');
+      if (!turn.snapshotReady) deferredReasons.push('snapshot_not_ready');
+      if (!turn.retained) deferredReasons.push('retention_unsupported');
+    }
     return {
       responseCount: responses.length,
       model: responses.filter(response => response.model).at(-1)?.model,
+      rootEnded: turn.spanEnded,
+      deferredReasons,
     };
   }
 
@@ -206,11 +233,13 @@ export class Session {
     promptId: string | undefined,
     failure: { reason: string; details?: string; lastAssistantMessage?: string },
   ): Promise<{ responseCount: number }> {
-    const snapshot = await this.snapshotStop(promptId, failure.lastAssistantMessage);
-    const turn = this.turnForPrompt(promptId);
-    if (turn) {
-      turn.failure = new Error(failure.details ?? failure.reason);
+    const turn = this.ensureTurn(promptId);
+    turn.failure = new Error(failure.details ?? failure.reason);
+    if (turn.spanEnded) {
+      const child = turn.span.startTool({ name: 'turn.failure' });
+      child.end({ error: turn.failure, errorType: failure.reason });
     }
+    const snapshot = await this.snapshotStop(promptId, failure.lastAssistantMessage);
     return { responseCount: snapshot.responseCount };
   }
 
@@ -343,10 +372,19 @@ export class Session {
       promptId: options.promptId,
       userText: cursor.userText,
       phase: 'active',
+      snapshotReady: false,
+      spanEnded: false,
+      retained: false,
       children: new Set(),
       responseOffset: cursor.responseOffset,
       seenResponses: new Set(),
     };
+    const retained = retainedTurnSpan(span, this.conversation, () => turn.spanEnded);
+    if (!retained.supported) {
+      this.log('ERROR', 'forge-sdk internals changed: turn roots will stay open past Stop');
+    }
+    turn.retained = retained.supported;
+    turn.span = retained.span;
     if (cursor.responseLimit !== undefined) turn.responseLimit = cursor.responseLimit;
     this.turns.add(turn);
     if (options.makeCurrent !== false) this.currentTurn = turn;
@@ -422,7 +460,7 @@ export class Session {
       // hook to the matching final transcript turn.
       turn.responseOffset = finalResponseOffset;
       turn.userText = finalTranscriptTurn.userText;
-      if (turn.userText !== undefined) {
+      if (turn.userText !== undefined && !turn.spanEnded) {
         turn.span.record({
           messages: [{ role: 'user', parts: [{ type: 'text', content: turn.userText }] }],
         });
@@ -460,8 +498,20 @@ export class Session {
       seen: turn.seenResponses,
       userMessage: turn.userText,
     });
-
     const outputTexts = responses.flatMap(response => extractAssistantTextBlocks(response.content));
+    if (turn.spanEnded && options.lastMessage && !outputTexts.includes(options.lastMessage)) {
+      const key = `stop:${options.lastMessage}`;
+      if (!turn.seenResponses.has(key)) {
+        const model = responses.filter(response => response.model).at(-1)?.model;
+        const chat = turn.span.startLLM({ model: model ?? this.initialRequestModel ?? 'unknown' });
+        chat.output(options.lastMessage);
+        chat.setAttributes({ [ATTR.AGENT_NAME]: this.agentName });
+        chat.end();
+        turn.seenResponses.add(key);
+      }
+    }
+    if (turn.spanEnded) return;
+
     if (!outputTexts.length && options.lastMessage) outputTexts.push(options.lastMessage);
     if (outputTexts.length) {
       turn.span.record({ outputMessages: assistantOutputMessages(outputTexts) });
@@ -523,18 +573,30 @@ export class Session {
   }
 
   private endTurn(turn: TurnTrace, endTime?: Date): void {
-    turn.span.end({
-      ...(endTime ? { endTime } : {}),
-      ...(turn.failure ? { error: turn.failure } : {}),
-    });
+    this.endTurnSpan(turn, endTime);
     this.turns.delete(turn);
     if (this.currentTurn === turn) this.currentTurn = undefined;
   }
 
+  private endTurnSpan(turn: TurnTrace, endTime?: Date): void {
+    if (turn.spanEnded) return;
+    turn.span.end({
+      ...(endTime ? { endTime } : {}),
+      ...(turn.failure ? { error: turn.failure } : {}),
+    });
+    turn.spanEnded = true;
+  }
+
   finishSupersededTurns(): void {
     for (const turn of [...this.turns]) {
-      if (turn.responseLimit !== undefined && turn.children.size === 0) {
+      if (turn.children.size !== 0) continue;
+
+      if (turn.responseLimit !== undefined) {
         this.finalizeTurn(turn, 'superseded_by_next_prompt');
+        continue;
+      }
+      if (turn.phase === 'stopped' && turn.snapshotReady && turn.retained) {
+        this.endTurnSpan(turn);
       }
     }
   }
@@ -578,6 +640,43 @@ export class Session {
     }
     return result;
   }
+}
+
+function retainedTurnSpan(
+  span: tracing.Turn,
+  conversation: tracing.Conversation,
+  isEnded: () => boolean,
+): { span: tracing.Turn; supported: boolean } {
+  // forge-sdk 0.1.0-beta.0 forbids children of ended Turns. Its TS-protected
+  // span is a plain runtime field; retain its context for late child factories.
+  const inner = (span as unknown as { span?: Span }).span;
+  if (typeof inner?.spanContext !== 'function') return { span, supported: false };
+  const parentContext = trace.setSpan(ROOT_CONTEXT, inner);
+  const context = {
+    parentContext,
+    conversationId: conversation.conversationId,
+    attributes: conversation.attributes,
+  };
+  const children = {
+    startLLM: (opts: tracing.LLMInit) => isEnded()
+      ? tracing.LLM.create({ ...opts, ...context }) : span.startLLM(opts),
+    startTool: (opts: tracing.ToolInit) => isEnded()
+      ? tracing.Tool.create({ ...opts, ...context }) : span.startTool(opts),
+    startSubagent: (opts: tracing.SubAgentInit) => isEnded()
+      ? tracing.SubAgent.create({ ...opts, ...context }) : span.startSubagent(opts),
+  };
+  return {
+    supported: true,
+    span: new Proxy(span, {
+      get(target, property) {
+        if (property === 'startLLM' || property === 'startTool' || property === 'startSubagent') {
+          return children[property];
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }),
+  };
 }
 
 async function resolveConversationId(

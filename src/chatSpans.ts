@@ -16,7 +16,7 @@ type ChatOptions = {
   agentName?: string;
   /** Used by blockable/repeated stop hooks to emit each response once. */
   seen?: Set<string>;
-  /** Recorded on the turn's first chat span; the root span exports only at turn close. */
+  /** Recorded on the turn's first chat span, before the root necessarily exports. */
   userMessage?: string;
 };
 
